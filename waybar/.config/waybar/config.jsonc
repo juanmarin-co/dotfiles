@@ -1,5 +1,9 @@
 {
-    "spacing": 4,
+    "layer": "top",
+    "position": "top",
+    "margin-left": 4,
+    "margin-right": 4,
+    "spacing": 2,
     "modules-left": [
         "niri/workspaces",
         "niri/window"
@@ -13,6 +17,52 @@
         "cpu",
         "memory",
         "battery",
+        "custom/dnd",
         "tray"
-    ]
+    ],
+    "niri/workspaces": {
+        "format": "{icon}",
+        "format-icons": {
+            "focused": "●",
+            "active": "●",
+            "default": "○"
+        }
+    },
+    "pulseaudio": {
+        "format": "{icon} {volume}%",
+        "format-muted": " muted",
+        "format-icons": {
+            "default": ["", "", ""]
+        }
+    },
+    "network": {
+        "format-wifi": " {essid}",
+        "format-ethernet": " wired",
+        "format-disconnected": "⚠ disconnected",
+        "tooltip-format": "{ifname} via {gwaddr}"
+    },
+    "cpu": {
+        "format": " {usage}%"
+    },
+    "memory": {
+        "format": " {percentage}%"
+    },
+    "battery": {
+        "states": {
+            "warning": 30,
+            "critical": 15
+        },
+        "format": "{icon} {capacity}%",
+        "format-charging": " {capacity}%",
+        "format-plugged": " {capacity}%",
+        "format-icons": ["", "", "", "", ""]
+    },
+    "custom/dnd": {
+        "interval": "once",
+        "return-type": "json",
+        "format": "{text}",
+        "exec": "if makoctl mode | grep -q 'dnd'; then echo '{\"text\": \"\", \"tooltip\": \"Do Not Disturb: Active\", \"class\": \"dnd\"}'; else echo '{\"text\": \"\", \"tooltip\": \"Do Not Disturb: Inactive\", \"class\": \"none\"}'; fi",
+        "on-click": "makoctl mode -t dnd; pkill -RTMIN+8 waybar",
+        "signal": 8
+    }
 }

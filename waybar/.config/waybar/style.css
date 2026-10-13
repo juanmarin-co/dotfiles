@@ -1,0 +1,55 @@
+/* Reference upstream template for other module styles: /etc/xdg/waybar/style.css */
+
+* {
+    font-family: "Inter", FontAwesome, Roboto, Helvetica, Arial, sans-serif;
+    font-size: 14px;
+    min-height: 0;
+}
+
+window#waybar {
+    background-color: transparent;
+    color: #ffffff;
+}
+
+window#waybar > box {
+    background-color: #0b0e14;
+    border-radius: 0 0 8px 8px;
+    padding: 4px 8px;
+}
+
+/* Workspaces */
+#workspaces button {
+    padding: 0 3px;
+    background-color: transparent;
+    color: #5a6378;
+    border: none;
+    box-shadow: none;
+    text-shadow: none;
+}
+
+#workspaces button.focused,
+#workspaces button.active {
+    color: #e6b450;
+}
+
+/* Active modules */
+#clock,
+#battery,
+#cpu,
+#memory,
+#network,
+#pulseaudio,
+#custom-dnd,
+#tray,
+#window {
+    padding: 0 4px;
+    color: #bfbdb6;
+}
+
+#custom-dnd.dnd {
+    color: #ffb454;
+}
+
+/* Status alerts */
+#battery.warning { color: #ffb454; }
+#battery.critical { color: #d95757; }
