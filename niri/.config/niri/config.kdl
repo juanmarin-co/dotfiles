@@ -63,8 +63,8 @@ animations {
 
 binds {
     // Applications.
-    Mod+1 { spawn-sh "~/.config/niri/scripts/focus-or-launch-firefox"; }
-    Mod+2 { spawn-sh "~/.config/niri/scripts/focus-or-launch-ghostty"; }
+    Mod+1 { spawn-sh "~/.config/niri/scripts/focus-or-launch firefox"; }
+    Mod+2 { spawn-sh "~/.config/niri/scripts/focus-or-launch com.mitchellh.ghostty ghostty"; }
     Mod+Space { spawn "fuzzel"; }
     Super+Alt+L { spawn "swaylock" "-f" "-c" "000000"; }
 

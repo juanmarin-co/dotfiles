@@ -1,0 +1,18 @@
+#!/bin/sh
+
+app_id="$1"
+cmd="${2:-$1}"
+
+if [ -z "$app_id" ]; then
+    echo "Usage: $0 <app-id> [command]" >&2
+    exit 1
+fi
+
+id=$(niri msg -j windows | jq -r --arg app "$app_id" \
+    '[.[] | select(.app_id == $app)] | sort_by(.focus_timestamp.secs, .focus_timestamp.nanos) | last | .id // empty')
+
+if [ -n "$id" ]; then
+    exec niri msg action focus-window --id "$id"
+else
+    exec $cmd
+fi
