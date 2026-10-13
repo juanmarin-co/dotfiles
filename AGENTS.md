@@ -16,8 +16,10 @@ To add a tool, mirror its path under a package folder and link it with `stow <pa
 | Mako | [mako-project.org](https://mako-project.org/) | [emersion/mako](https://github.com/emersion/mako) |
 | swaybg | [github.com/swaywm/swaybg](https://github.com/swaywm/swaybg) | [swaywm/swaybg](https://github.com/swaywm/swaybg) |
 | swaylock | [github.com/swaywm/swaylock](https://github.com/swaywm/swaylock) | [swaywm/swaylock](https://github.com/swaywm/swaylock) |
+| swayidle | [github.com/swaywm/swayidle](https://github.com/swaywm/swayidle) | [swaywm/swayidle](https://github.com/swaywm/swayidle) |
 | grim | [sr.ht/~emersion/grim](https://sr.ht/~emersion/grim/) | [emersion/grim](https://github.com/emersion/grim) |
 | slurp | [sr.ht/~emersion/slurp](https://sr.ht/~emersion/slurp/) | [emersion/slurp](https://github.com/emersion/slurp) |
+| Satty | [github.com/gabm/satty](https://github.com/gabm/satty) | [gabm/satty](https://github.com/gabm/satty) |
 | Ghostty | [ghostty.org](https://ghostty.org/) | [ghostty-org/ghostty](https://github.com/ghostty-org/ghostty) |
 | Zsh | [zsh.org](https://www.zsh.org/) | [zsh-users/zsh](https://github.com/zsh-users/zsh) |
 | Oh My Zsh | [ohmyz.sh](https://ohmyz.sh/) | [ohmyzsh/ohmyzsh](https://github.com/ohmyzsh/ohmyzsh) |
