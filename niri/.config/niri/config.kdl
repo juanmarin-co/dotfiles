@@ -119,6 +119,3 @@ binds {
     Mod+Shift+Slash { show-hotkey-overlay; }
     Mod+Shift+E { quit; }
 }
-
-
-include "noctalia.kdl"
