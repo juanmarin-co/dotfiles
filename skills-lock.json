@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "skills": {
+    "dependency-docs": {
+      "source": "juanmarin-co/skills",
+      "sourceType": "github",
+      "skillPath": "skills/dependency-docs/SKILL.md",
+      "computedHash": "d3b8a2aaf12cda6743043d401d4f3fcd242748c8c5284d5d365d414ed3c1d778"
+    }
+  }
+}
