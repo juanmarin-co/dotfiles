@@ -39,7 +39,8 @@
         "format-wifi": " {essid}",
         "format-ethernet": " wired",
         "format-disconnected": "⚠ disconnected",
-        "tooltip-format": "{ifname} via {gwaddr}"
+        "tooltip-format": "{ifname} via {gwaddr}",
+        "on-click": "ghostty --class=com.ghostty.nmtui --window-width=70 --window-height=24 -e nmtui connect"
     },
     "cpu": {
         "format": " {usage}%"
