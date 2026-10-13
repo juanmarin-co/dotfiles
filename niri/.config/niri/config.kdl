@@ -31,8 +31,8 @@ layout {
 
     focus-ring {
         width 1
-        active-color "#7fc8ff"
-        inactive-color "#505050"
+        active-color "#e6b450"
+        inactive-color "#5a6378"
     }
 
     border { off; }
@@ -55,10 +55,6 @@ debug {
 // Keep overview keyboard-driven.
 gestures {
     hot-corners { off; }
-}
-
-animations {
-    slowdown 0.5
 }
 
 binds {
@@ -93,10 +89,14 @@ binds {
     Mod+BracketLeft { consume-or-expel-window-left; }
     Mod+BracketRight { consume-or-expel-window-right; }
 
-    // Audio controls.
-    XF86AudioRaiseVolume { spawn "wpctl" "set-volume" "@DEFAULT_AUDIO_SINK@" "5%+"; }
-    XF86AudioLowerVolume { spawn "wpctl" "set-volume" "@DEFAULT_AUDIO_SINK@" "5%-"; }
-    XF86AudioMute { spawn "wpctl" "set-mute" "@DEFAULT_AUDIO_SINK@" "toggle"; }
+    // Audio and media controls.
+    XF86AudioRaiseVolume allow-when-locked=true { spawn "wpctl" "set-volume" "@DEFAULT_AUDIO_SINK@" "5%+"; }
+    XF86AudioLowerVolume allow-when-locked=true { spawn "wpctl" "set-volume" "@DEFAULT_AUDIO_SINK@" "5%-"; }
+    XF86AudioMute        allow-when-locked=true { spawn "wpctl" "set-mute" "@DEFAULT_AUDIO_SINK@" "toggle"; }
+    XF86AudioPlay        allow-when-locked=true { spawn "playerctl" "play-pause"; }
+    XF86AudioPause       allow-when-locked=true { spawn "playerctl" "play-pause"; }
+    XF86AudioNext        allow-when-locked=true { spawn "playerctl" "next"; }
+    XF86AudioPrev        allow-when-locked=true { spawn "playerctl" "previous"; }
 
     // Screenshots and session controls.
     Print { spawn-sh "grim -g \"$(slurp)\" - | satty --filename -"; }
