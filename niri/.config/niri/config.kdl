@@ -48,6 +48,11 @@ window-rule {
     open-floating true
 }
 
+window-rule {
+    match app-id="com.ghostty.nmtui"
+    open-floating true
+}
+
 debug {
     honor-xdg-activation-with-invalid-serial
 }
