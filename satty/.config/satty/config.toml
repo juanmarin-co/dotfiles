@@ -1,0 +1,2 @@
+[general]
+output-filename = "~/Pictures/Screenshots/Screenshot from %Y-%m-%d %H-%M-%S.png"
