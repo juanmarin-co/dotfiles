@@ -1,0 +1,10 @@
+#!/bin/sh
+
+id=$(niri msg -j windows | jq -r \
+    '[.[] | select(.app_id == "firefox")] | sort_by(.focus_timestamp.secs, .focus_timestamp.nanos) | last | .id // empty')
+
+if [ -n "$id" ]; then
+    exec niri msg action focus-window --id "$id"
+else
+    exec firefox
+fi

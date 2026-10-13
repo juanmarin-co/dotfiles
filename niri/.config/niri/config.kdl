@@ -1,6 +1,6 @@
 spawn-at-startup "waybar"
 spawn-at-startup "swayidle" "-w"
-spawn-at-startup "swaybg" "-i" "/home/juan/Pictures/wallpaper.png" "-m" "fill"
+spawn-sh-at-startup "swaybg -i ~/Pictures/wallpaper.png -m fill"
 spawn-at-startup "mako"
 
 environment {
@@ -63,8 +63,8 @@ animations {
 
 binds {
     // Applications.
-    Mod+1 { spawn "/home/juan/.local/bin/focus-or-launch-firefox"; }
-    Mod+2 { spawn "/home/juan/.local/bin/focus-or-launch-ghostty"; }
+    Mod+1 { spawn-sh "~/.config/niri/scripts/focus-or-launch-firefox"; }
+    Mod+2 { spawn-sh "~/.config/niri/scripts/focus-or-launch-ghostty"; }
     Mod+Space { spawn "fuzzel"; }
     Super+Alt+L { spawn "swaylock" "-f" "-c" "000000"; }
 
