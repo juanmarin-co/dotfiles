@@ -1,0 +1,19 @@
+font=Inter 14px
+background-color=#0b0e14fa
+text-color=#bfbdb6
+border-color=#1b1f29
+border-size=1
+border-radius=8
+progress-color=over #e6b450
+default-timeout=5000
+
+[urgency=critical]
+border-color=#d95757
+default-timeout=0
+
+[mode=dnd]
+invisible=1
+
+[mode=dnd urgency=critical]
+invisible=0
+
