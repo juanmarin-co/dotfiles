@@ -1,0 +1,124 @@
+// Minimal Niri configuration for Noctalia.
+// https://docs.noctalia.dev/noctalia/compositor-settings/niri/
+
+spawn-at-startup "noctalia"
+
+environment {
+    GTK_IM_MODULE "simple"
+}
+
+input {
+    keyboard {
+        xkb {
+            options "compose:ralt"
+        }
+    }
+
+    touchpad {
+        tap
+        natural-scroll
+    }
+}
+
+layout {
+    gaps 4
+    default-column-width { proportion 1.0; }
+
+    preset-column-widths {
+        proportion 0.5
+        proportion 1.0
+    }
+
+    focus-ring {
+        width 1
+        active-color "#7fc8ff"
+        inactive-color "#505050"
+    }
+
+    border { off; }
+}
+
+// Recommended by Noctalia.
+window-rule {
+    geometry-corner-radius 8
+    clip-to-geometry true
+}
+
+window-rule {
+    match app-id="dev.noctalia.Noctalia"
+    open-floating true
+    default-column-width { fixed 1080; }
+    default-window-height { fixed 920; }
+}
+
+debug {
+    honor-xdg-activation-with-invalid-serial
+}
+
+// Keep overview keyboard-driven.
+gestures {
+    hot-corners { off; }
+}
+
+animations {
+    slowdown 0.5
+}
+
+binds {
+    // Applications and Noctalia.
+    Mod+1 { spawn "/home/juan/.local/bin/focus-or-launch-firefox"; }
+    Mod+2 { spawn "/home/juan/.local/bin/focus-or-launch-ghostty"; }
+    Mod+Space { spawn-sh "noctalia msg panel-toggle launcher"; }
+    Mod+S { spawn-sh "noctalia msg panel-toggle control-center"; }
+    Mod+Comma { spawn-sh "noctalia msg settings-toggle"; }
+    Alt+Tab repeat=false { spawn-sh "noctalia msg window-switcher"; }
+    Super+Alt+L { spawn-sh "noctalia msg session lock"; }
+
+    // H/L navigates columns. J/K traverses a stack, then the adjacent workspace.
+    Mod+H { focus-column-left; }
+    Mod+J { focus-window-or-workspace-down; }
+    Mod+K { focus-window-or-workspace-up; }
+    Mod+L { focus-column-right; }
+
+    // Ctrl moves windows; J/K crosses into a workspace at the stack edge.
+    Mod+Ctrl+H { move-column-left; }
+    Mod+Ctrl+J { move-window-down-or-to-workspace-down; }
+    Mod+Ctrl+K { move-window-up-or-to-workspace-up; }
+    Mod+Ctrl+L { move-column-right; }
+
+    // Shift+J/K reorders whole workspaces.
+    Mod+Shift+J { move-workspace-down; }
+    Mod+Shift+K { move-workspace-up; }
+
+    // Common layout actions.
+    Mod+O { toggle-overview; }
+    Mod+Q { close-window; }
+    Mod+F { switch-preset-column-width; }
+    Mod+Shift+F { fullscreen-window; }
+    Mod+V { toggle-window-floating; }
+    Mod+BracketLeft { consume-or-expel-window-left; }
+    Mod+BracketRight { consume-or-expel-window-right; }
+
+    // Noctalia audio and brightness controls.
+    XF86AudioRaiseVolume { spawn-sh "noctalia msg volume-up"; }
+    XF86AudioLowerVolume { spawn-sh "noctalia msg volume-down"; }
+    XF86AudioMute { spawn-sh "noctalia msg volume-mute"; }
+    XF86AudioPlay { spawn-sh "noctalia msg media toggle"; }
+    XF86AudioStop { spawn-sh "noctalia msg media stop"; }
+    XF86AudioPrev { spawn-sh "noctalia msg media previous"; }
+    XF86AudioNext { spawn-sh "noctalia msg media next"; }
+    XF86MonBrightnessUp { spawn-sh "noctalia msg brightness-up"; }
+    XF86MonBrightnessDown { spawn-sh "noctalia msg brightness-down"; }
+
+    // Screenshots and session controls.
+    Print { screenshot; }
+    Ctrl+Print { screenshot-screen; }
+    Alt+Print { screenshot-window; }
+    Mod+Shift+R { spawn "noctalia" "msg" "plugin" "noctalia/screen_recorder:service" "all" "toggle"; }
+    Mod+Shift+P { power-off-monitors; }
+    Mod+Shift+Slash { show-hotkey-overlay; }
+    Mod+Shift+E { quit; }
+}
+
+
+include "noctalia.kdl"
