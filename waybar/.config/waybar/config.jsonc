@@ -28,6 +28,29 @@
             "default": "○"
         }
     },
+    "clock": {
+        "interval": 1,
+        "format": "{:%a %b %d  %H:%M:%S}",
+        "tooltip-format": "<tt><small>{calendar}</small></tt>",
+        "calendar": {
+            "mode": "month",
+            "mode-mon-col": 3,
+            "weeks-pos": "right",
+            "on-scroll": 1,
+            "format": {
+                "months": "<span color='#59c2ff'><b>{}</b></span>",
+                "days": "<span color='#bfbdb6'><b>{}</b></span>",
+                "weeks": "<span color='#5a6378'><b>W{}</b></span>",
+                "weekdays": "<span color='#ffb454'><b>{}</b></span>",
+                "today": "<span color='#e6b450'><b><u>{}</u></b></span>"
+            }
+        },
+        "actions": {
+            "on-click-right": "mode",
+            "on-scroll-up": "shift_up",
+            "on-scroll-down": "shift_down"
+        }
+    },
     "pulseaudio": {
         "format": "{icon} {volume}%",
         "format-muted": " muted",
