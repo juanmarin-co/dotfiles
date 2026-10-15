@@ -39,6 +39,7 @@ window#waybar > box {
 #memory,
 #network,
 #pulseaudio,
+#power-profiles-daemon,
 #custom-dnd,
 #tray,
 #window {
