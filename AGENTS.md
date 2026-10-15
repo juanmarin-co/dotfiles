@@ -6,6 +6,8 @@ Prefer default settings whenever possible. Add configurations only when the user
 
 To add a tool, mirror its path under a package folder and link it with `stow <package>`. Always ask the user before running `git commit`.
 
+Theme desktop components with [Ayu](https://ayutheme.com/) (Dark variant). Use Inter for UI elements and JetBrains Mono for terminal emulators.
+
 ## Tools of Interest
 
 | Tool | Homepage / Docs | Git Repository |
