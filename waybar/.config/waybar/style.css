@@ -39,10 +39,10 @@ window#waybar > box {
 #memory,
 #network,
 #pulseaudio,
+#backlight,
 #power-profiles-daemon,
 #custom-dnd,
-#tray,
-#window {
+#tray {
     padding: 0 4px;
     color: #bfbdb6;
 }
