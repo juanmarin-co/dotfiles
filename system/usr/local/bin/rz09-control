@@ -1,0 +1,959 @@
+#!/usr/bin/env python3
+"""Hardcoded thermal and performance controller for the Razer RZ09-0328."""
+
+from __future__ import annotations
+
+import argparse
+import ctypes
+import fcntl
+import html
+import json
+import logging
+import os
+import random
+import signal
+import socket
+import subprocess
+import sys
+import time
+from dataclasses import asdict, dataclass
+from pathlib import Path
+
+# Policy
+FAN_CURVE = (
+    (60.0, 3500),
+    (70.0, 4000),
+    (80.0, 4500),
+)
+
+POLL_INTERVAL_SECONDS = 1.0
+VERIFY_INTERVAL_SECONDS = 60.0
+FAN_HYSTERESIS_C = 2.0
+GPU_DEMAND_HOLD_SECONDS = 30.0
+COOLING_RECOVERY_SECONDS = 30.0
+GPU_CLIENT_POLL_INTERVAL_SECONDS = 3.0
+MAXIMUM_FAN_RPM = 5000
+
+HIGH_TEMPERATURE_C = 85.0
+RECOVERY_TEMPERATURE_C = 80.0
+WAYBAR_WARNING_C = 70.0
+WAYBAR_CRITICAL_C = HIGH_TEMPERATURE_C
+
+# Hardware
+USB_VENDOR_ID = 0x1532
+USB_PRODUCT_ID = 0x0255
+USB_INTERFACE = 0
+CPU_HWMON_NAME = "coretemp"
+CPU_HWMON_LABEL = "Package id 0"
+AC_ONLINE_PATH = Path("/sys/class/power_supply/AC0/online")
+GPU_PCI_ADDRESS = "0000:01:00.0"
+GPU_NVML_PCI_ADDRESS = b"00000000:01:00.0"
+GPU_DEVICE_NODE = Path("/dev/nvidia0")
+GPU_SYSFS_DIRECTORY = Path("/sys/bus/pci/devices") / GPU_PCI_ADDRESS
+FUSER = "/usr/bin/fuser"
+
+# Razer HID protocol
+REPORT_BUFFER_SIZE = 91
+HIDIOCSFEATURE = 0xC0004806 | (REPORT_BUFFER_SIZE << 16)
+HIDIOCGFEATURE = 0xC0004807 | (REPORT_BUFFER_SIZE << 16)
+COMMAND_CLASS = 0x0D
+COMMAND_ATTEMPTS = 5
+COMMAND_DELAY_SECONDS = 0.05
+RETRY_DELAY_RANGE_SECONDS = (0.02, 0.10)
+TARGETS = (1, 2)
+MODE_BALANCED = 0x00
+MODE_GAMING = 0x01
+AUTOMATIC = 0
+MANUAL = 1
+COMMAND_GET_MODE = 0x82
+COMMAND_SET_MODE = 0x02
+COMMAND_GET_RPM = 0x81
+COMMAND_SET_RPM = 0x01
+
+# Runtime and presentation
+STATUS_SOCKET = Path("/run/rz09-control/status.sock")
+MAX_STATUS_SUBSCRIBERS = 8
+SOCKET_SEND_TIMEOUT_SECONDS = 0.05
+FAN_ICON = ""
+THERMOMETER_ICON = ""
+
+LOG = logging.getLogger("rz09-control")
+STOP_REQUESTED = False
+
+
+@dataclass(frozen=True)
+class DesiredControl:
+    mode: int
+    mode_name: str
+    manual: bool
+    target_rpm: int | None
+    high_temperature_cooling: bool = False
+
+    def key(self) -> tuple[object, ...]:
+        return self.mode, self.manual, self.target_rpm
+
+
+@dataclass
+class GPUReading:
+    power_state: str = "unknown"
+    runtime_status: str = "unknown"
+    in_use: bool = False
+    temperature_c: int | None = None
+    utilization_percent: int | None = None
+    memory_used_mb: int | None = None
+    memory_total_mb: int | None = None
+    clients: list[str] | None = None
+    error: str | None = None
+
+
+@dataclass
+class ControlReading:
+    performance_mode: str = "Unknown"
+    fan_control: str = "Unknown"
+    fan_target_rpm: int | None = None
+    high_temperature_cooling: bool = False
+    healthy: bool = False
+    error: str | None = None
+    collisions: int = 0
+
+
+@dataclass
+class StatusSnapshot:
+    timestamp: float
+    cpu_temp_c: float | None
+    ac_online: bool
+    gpu: GPUReading
+    control: ControlReading
+
+
+# Commands
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("command", choices=("daemon", "waybar", "reset"))
+    args = parser.parse_args()
+
+    if args.command == "daemon":
+        return run_daemon()
+    if args.command == "waybar":
+        return run_waybar()
+    return reset_hardware()
+
+
+def run_daemon() -> int:
+    global STOP_REQUESTED
+
+    logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
+    signal.signal(signal.SIGTERM, request_stop)
+    signal.signal(signal.SIGINT, request_stop)
+
+    publisher = StatusPublisher(STATUS_SOCKET)
+    telemetry = Telemetry()
+    policy = FanPolicy()
+    controller = HardwareController()
+    previous_error: str | None = None
+    previous_suspend_offset = suspend_offset()
+
+    LOG.info("starting RZ09-0328 controller")
+    try:
+        while not STOP_REQUESTED:
+            started = time.monotonic()
+            current_suspend_offset = suspend_offset()
+            if current_suspend_offset - previous_suspend_offset > 2.0:
+                LOG.info("resume detected; reapplying control policy")
+                controller.invalidate()
+            previous_suspend_offset = current_suspend_offset
+
+            cpu_temp, cpu_error = telemetry.cpu_temperature()
+            gpu = telemetry.gpu_reading()
+            ac_online = read_text(AC_ONLINE_PATH, "unknown") == "1"
+
+            if cpu_temp is None:
+                policy.recovery_since = None
+                desired = safe_control()
+            else:
+                desired = policy.evaluate(
+                    cpu_temp,
+                    gpu.temperature_c,
+                    gpu.in_use,
+                    ac_online,
+                    time.monotonic(),
+                )
+
+            control_error = cpu_error
+            try:
+                controller.ensure(desired)
+            except ControlError as error:
+                control_error = str(error)
+                controller.invalidate()
+
+            if control_error != previous_error:
+                if control_error:
+                    LOG.error("%s", control_error)
+                elif previous_error:
+                    LOG.info("monitoring and hardware control recovered")
+                previous_error = control_error
+
+            snapshot = StatusSnapshot(
+                timestamp=time.time(),
+                cpu_temp_c=cpu_temp,
+                ac_online=ac_online,
+                gpu=gpu,
+                control=control_reading(
+                    desired,
+                    healthy=control_error is None,
+                    error=control_error,
+                    collisions=controller.collisions,
+                ),
+            )
+            publisher.publish(snapshot)
+
+            remaining = POLL_INTERVAL_SECONDS - (time.monotonic() - started)
+            if remaining > 0:
+                sleep_until_stop(remaining)
+    finally:
+        try:
+            controller.reset()
+        except ControlError as error:
+            LOG.error("could not restore Balanced/automatic control: %s", error)
+        publisher.close()
+
+    LOG.info("stopped RZ09-0328 controller")
+    return 0
+
+
+def run_waybar() -> int:
+    try:
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as connection:
+            connection.connect(str(STATUS_SOCKET))
+            with connection.makefile("r", encoding="utf-8") as stream:
+                for line in stream:
+                    try:
+                        snapshot = json.loads(line)
+                        print(format_waybar(snapshot), flush=True)
+                    except (KeyError, TypeError, ValueError, json.JSONDecodeError):
+                        continue
+    except BrokenPipeError:
+        sys.stdout = open(os.devnull, "w", encoding="utf-8")
+        return 0
+    except (FileNotFoundError, ConnectionError, OSError):
+        try:
+            print(format_waybar_unavailable(), flush=True)
+        except BrokenPipeError:
+            sys.stdout = open(os.devnull, "w", encoding="utf-8")
+            return 0
+        return 1
+    return 1
+
+
+def reset_hardware() -> int:
+    logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
+    controller = HardwareController()
+    try:
+        controller.reset()
+    except ControlError as error:
+        LOG.error("could not restore Balanced/automatic control: %s", error)
+        return 1
+    return 0
+
+
+def request_stop(_signum: int, _frame: object) -> None:
+    global STOP_REQUESTED
+    STOP_REQUESTED = True
+
+
+def sleep_until_stop(seconds: float) -> None:
+    deadline = time.monotonic() + seconds
+    while not STOP_REQUESTED:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return
+        time.sleep(min(remaining, 0.1))
+
+
+# Policy and control orchestration
+
+def normal_control(
+    gaming: bool,
+    target_rpm: int | None,
+    high_temperature_cooling: bool = False,
+) -> DesiredControl:
+    return DesiredControl(
+        mode=MODE_GAMING if gaming else MODE_BALANCED,
+        mode_name="Gaming" if gaming else "Balanced",
+        manual=target_rpm is not None,
+        target_rpm=target_rpm,
+        high_temperature_cooling=high_temperature_cooling,
+    )
+
+
+def safe_control() -> DesiredControl:
+    return DesiredControl(
+        mode=MODE_BALANCED,
+        mode_name="Balanced",
+        manual=False,
+        target_rpm=None,
+    )
+
+
+def control_reading(
+    desired: DesiredControl,
+    *,
+    healthy: bool,
+    error: str | None,
+    collisions: int,
+) -> ControlReading:
+    if not healthy:
+        return ControlReading(error=error, collisions=collisions)
+    return ControlReading(
+        performance_mode=desired.mode_name,
+        fan_control="Manual" if desired.manual else "Automatic",
+        fan_target_rpm=desired.target_rpm,
+        high_temperature_cooling=desired.high_temperature_cooling,
+        healthy=True,
+        collisions=collisions,
+    )
+
+
+class FanPolicy:
+    def __init__(self) -> None:
+        self.fan_demand: int | None = None
+        self.last_gpu_sample_at: float | None = None
+        self.last_gpu_temperature: float | None = None
+        self.high_temperature_cooling = False
+        self.recovery_since: float | None = None
+
+    def evaluate(
+        self,
+        cpu_temperature: float,
+        gpu_temperature: float | None,
+        gpu_in_use: bool,
+        ac_online: bool,
+        now: float,
+    ) -> DesiredControl:
+        if gpu_temperature is not None:
+            self.last_gpu_sample_at = now
+            self.last_gpu_temperature = gpu_temperature
+        held_gpu_temperature = self._gpu_temperature(gpu_temperature, now)
+        control_temperature = max(
+            value
+            for value in (cpu_temperature, held_gpu_temperature)
+            if value is not None
+        )
+
+        self._update_cooling(control_temperature, now)
+        self.fan_demand = (
+            MAXIMUM_FAN_RPM
+            if self.high_temperature_cooling
+            else curve_demand(control_temperature, self.fan_demand)
+        )
+        return normal_control(
+            gpu_in_use and ac_online,
+            self.fan_demand,
+            self.high_temperature_cooling,
+        )
+
+    def _gpu_temperature(
+        self,
+        current: float | None,
+        now: float,
+    ) -> float | None:
+        if current is not None:
+            return current
+        if (
+            self.last_gpu_sample_at is not None
+            and now - self.last_gpu_sample_at <= GPU_DEMAND_HOLD_SECONDS
+        ):
+            return self.last_gpu_temperature
+        return None
+
+    def _update_cooling(self, temperature: float, now: float) -> None:
+        if temperature >= HIGH_TEMPERATURE_C:
+            self.high_temperature_cooling = True
+            self.recovery_since = None
+            return
+        if not self.high_temperature_cooling:
+            return
+        if temperature > RECOVERY_TEMPERATURE_C:
+            self.recovery_since = None
+            return
+        if self.recovery_since is None:
+            self.recovery_since = now
+            return
+        if now - self.recovery_since >= COOLING_RECOVERY_SECONDS:
+            self.high_temperature_cooling = False
+            self.recovery_since = None
+            self.fan_demand = None
+
+
+def curve_demand(temperature: float, previous: int | None) -> int | None:
+    demand = step_curve(temperature)
+    if previous is not None and (demand is None or demand < previous):
+        demand = step_curve(temperature + FAN_HYSTERESIS_C)
+    return demand
+
+
+def step_curve(temperature: float) -> int | None:
+    demand: int | None = None
+    for threshold, target in FAN_CURVE:
+        if temperature < threshold:
+            break
+        demand = target
+    return demand
+
+
+class HardwareController:
+    def __init__(self) -> None:
+        self.hid: RazerHID | None = None
+        self.applied: DesiredControl | None = None
+        self.verify_at = 0.0
+        self.collisions = 0
+
+    def ensure(self, desired: DesiredControl) -> None:
+        hid = self._hid()
+        now = time.monotonic()
+        try:
+            if self.applied is not None and self.applied.key() == desired.key():
+                if now < self.verify_at:
+                    return
+                if self._matches(hid, desired):
+                    self.verify_at = now + VERIFY_INTERVAL_SECONDS
+                    self.collisions = hid.collisions
+                    return
+                self.applied = None
+
+            if (
+                self.applied is not None
+                and same_profile_and_fan_mode(self.applied, desired)
+                and desired.manual
+                and self.applied.target_rpm != desired.target_rpm
+            ):
+                self._set_rpm(hid, desired.target_rpm)
+            else:
+                self._apply(hid, desired)
+
+            self.applied = desired
+            self.verify_at = now + VERIFY_INTERVAL_SECONDS
+            LOG.info(
+                "applied %s, fans %s%s",
+                desired.mode_name,
+                "manual" if desired.manual else "automatic",
+                f" at {desired.target_rpm} RPM" if desired.manual else "",
+            )
+        except (OSError, HIDError) as error:
+            self.collisions = hid.collisions
+            self._close_hid()
+            raise ControlError(f"Razer HID control failed: {error}") from error
+        self.collisions = hid.collisions
+
+    def invalidate(self) -> None:
+        self.applied = None
+        self.verify_at = 0.0
+
+    def reset(self) -> None:
+        hid = self._hid()
+        try:
+            for target in TARGETS:
+                hid.set_mode(target, MODE_BALANCED, AUTOMATIC)
+            self.applied = safe_control()
+            self.verify_at = time.monotonic() + VERIFY_INTERVAL_SECONDS
+        except (OSError, HIDError) as error:
+            self.collisions = hid.collisions
+            self._close_hid()
+            raise ControlError(f"Razer HID reset failed: {error}") from error
+        self.collisions = hid.collisions
+
+    def _hid(self) -> RazerHID:
+        if self.hid is None:
+            try:
+                self.hid = RazerHID.open()
+            except (OSError, HIDError) as error:
+                raise ControlError(f"cannot open Razer HID device: {error}") from error
+        return self.hid
+
+    def _close_hid(self) -> None:
+        if self.hid is not None:
+            self.hid.close()
+            self.hid = None
+
+    def _apply(self, hid: RazerHID, desired: DesiredControl) -> None:
+        if desired.manual:
+            self._set_rpm(hid, desired.target_rpm)
+        for target in TARGETS:
+            hid.set_mode(target, desired.mode, MANUAL if desired.manual else AUTOMATIC)
+
+    @staticmethod
+    def _set_rpm(hid: RazerHID, rpm: int | None) -> None:
+        if rpm is None:
+            raise ControlError("manual fan control requires an RPM target")
+        for target in TARGETS:
+            hid.set_rpm(target, rpm)
+
+    @staticmethod
+    def _matches(hid: RazerHID, desired: DesiredControl) -> bool:
+        for target in TARGETS:
+            mode, manual = hid.read_mode(target)
+            if mode != desired.mode or manual != int(desired.manual):
+                return False
+            if desired.manual and hid.read_rpm(target) != desired.target_rpm:
+                return False
+        return True
+
+
+def same_profile_and_fan_mode(left: DesiredControl, right: DesiredControl) -> bool:
+    return (
+        left.mode == right.mode
+        and left.manual == right.manual
+    )
+
+
+def suspend_offset() -> float:
+    return time.clock_gettime(time.CLOCK_BOOTTIME) - time.monotonic()
+
+
+# Telemetry and status publication
+
+class Telemetry:
+    def __init__(self) -> None:
+        self.cpu_input: Path | None = None
+        self.gpu_pids: list[int] = []
+        self.gpu_clients_checked_at = 0.0
+        self.nvml = NVML()
+
+    def cpu_temperature(self) -> tuple[float | None, str | None]:
+        try:
+            if self.cpu_input is None:
+                self.cpu_input = find_cpu_temperature_input()
+            return int(self.cpu_input.read_text().strip()) / 1000.0, None
+        except (OSError, ValueError, ControlError) as error:
+            self.cpu_input = None
+            return None, f"CPU temperature unavailable: {error}"
+
+    def gpu_reading(self) -> GPUReading:
+        reading = GPUReading(clients=[])
+        reading.power_state = read_text(GPU_SYSFS_DIRECTORY / "power_state", "unknown")
+        reading.runtime_status = read_text(
+            GPU_SYSFS_DIRECTORY / "power/runtime_status", "unknown"
+        )
+        if reading.power_state != "D0" or reading.runtime_status != "active":
+            self.gpu_pids = []
+            self.gpu_clients_checked_at = 0.0
+            return reading
+
+        now = time.monotonic()
+        if now - self.gpu_clients_checked_at >= GPU_CLIENT_POLL_INTERVAL_SECONDS:
+            self.gpu_pids = gpu_client_pids()
+            self.gpu_clients_checked_at = now
+        reading.in_use = bool(self.gpu_pids)
+        reading.clients = process_names(self.gpu_pids)
+        if not self.gpu_pids:
+            return reading
+
+        try:
+            metrics = self.nvml.sample()
+            reading.temperature_c = metrics[0]
+            reading.utilization_percent = metrics[1]
+            reading.memory_used_mb = metrics[2]
+            reading.memory_total_mb = metrics[3]
+        except NVMLFailure as error:
+            reading.error = str(error)
+        return reading
+
+
+def find_cpu_temperature_input() -> Path:
+    for directory in Path("/sys/class/hwmon").glob("hwmon*"):
+        try:
+            if (directory / "name").read_text().strip() != CPU_HWMON_NAME:
+                continue
+            for label in directory.glob("temp*_label"):
+                if CPU_HWMON_LABEL in label.read_text().strip():
+                    candidate = label.with_name(label.name.replace("_label", "_input"))
+                    if candidate.exists():
+                        return candidate
+        except OSError:
+            continue
+    raise ControlError(f"{CPU_HWMON_NAME} {CPU_HWMON_LABEL} sensor not found")
+
+
+def gpu_client_pids() -> list[int]:
+    if not GPU_DEVICE_NODE.exists():
+        return []
+    try:
+        result = subprocess.run(
+            (FUSER, str(GPU_DEVICE_NODE)),
+            check=False,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            text=True,
+            timeout=0.5,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return []
+    if result.returncode != 0:
+        return []
+    return sorted({int(token) for token in result.stdout.split() if token.isdigit()})
+
+
+def process_names(pids: list[int]) -> list[str]:
+    names: set[str] = set()
+    for pid in pids:
+        try:
+            name = (Path("/proc") / str(pid) / "comm").read_text().strip()
+            if name:
+                names.add(name)
+        except OSError:
+            continue
+    return sorted(names)
+
+
+def read_text(path: Path, default: str) -> str:
+    try:
+        return path.read_text().strip() or default
+    except OSError:
+        return default
+
+
+class StatusPublisher:
+    def __init__(self, path: Path) -> None:
+        self.path = path
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        self.path.unlink(missing_ok=True)
+        self.listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        self.listener.bind(str(path))
+        os.chmod(path, 0o666)
+        self.listener.listen(MAX_STATUS_SUBSCRIBERS)
+        self.listener.setblocking(False)
+        self.subscribers: list[socket.socket] = []
+
+    def publish(self, snapshot: StatusSnapshot) -> None:
+        self._accept()
+        payload = (json.dumps(asdict(snapshot), separators=(",", ":")) + "\n").encode()
+        active: list[socket.socket] = []
+        for subscriber in self.subscribers:
+            try:
+                subscriber.sendall(payload)
+                active.append(subscriber)
+            except OSError:
+                subscriber.close()
+        self.subscribers = active
+
+    def close(self) -> None:
+        for subscriber in self.subscribers:
+            subscriber.close()
+        self.listener.close()
+        self.path.unlink(missing_ok=True)
+
+    def _accept(self) -> None:
+        while len(self.subscribers) < MAX_STATUS_SUBSCRIBERS:
+            try:
+                subscriber, _ = self.listener.accept()
+            except BlockingIOError:
+                return
+            subscriber.settimeout(SOCKET_SEND_TIMEOUT_SECONDS)
+            self.subscribers.append(subscriber)
+
+
+# Waybar formatting
+
+def format_waybar(snapshot: dict[str, object]) -> str:
+    cpu = snapshot.get("cpu_temp_c")
+    gpu = snapshot["gpu"]
+    control = snapshot["control"]
+    if not isinstance(gpu, dict) or not isinstance(control, dict):
+        raise TypeError("invalid status snapshot")
+
+    gpu_temperature = gpu.get("temperature_c")
+    gpu_state = str(gpu.get("power_state") or "unknown")
+    gpu_display = temperature(gpu_temperature) if gpu_temperature is not None else gpu_state
+
+    fan_control = str(control.get("fan_control") or "Unknown")
+    fan_target = control.get("fan_target_rpm")
+    if fan_control == "Manual" and fan_target:
+        fan_display = f"{fan_target} RPM"
+    elif fan_control == "Automatic":
+        fan_display = "Auto"
+    else:
+        fan_display = fan_control
+    text = f"{THERMOMETER_ICON} {temperature(cpu)} · {gpu_display} · {FAN_ICON} {fan_display}"
+
+    tooltip = [f"CPU: {temperature(cpu)}", f"NVIDIA GPU: {gpu_state}"]
+    if gpu_temperature is not None:
+        tooltip.extend(
+            (
+                f"  Temperature: {temperature(gpu_temperature)}",
+                f"  Usage: {value_or_unknown(gpu.get('utilization_percent'), '%')}",
+                "  VRAM: "
+                f"{value_or_unknown(gpu.get('memory_used_mb'), '')} / "
+                f"{value_or_unknown(gpu.get('memory_total_mb'), ' MB')}",
+                "  Active by: " + ", ".join(
+                    html.escape(str(name)) for name in (gpu.get("clients") or ["client"])
+                ),
+            )
+        )
+    if gpu.get("error"):
+        tooltip.append(f"  Error: {html.escape(str(gpu['error']))}")
+
+    tooltip.extend(
+        (
+            "",
+            "Power: " + ("AC" if snapshot.get("ac_online") else "Battery / AC unconfirmed"),
+            f"Performance: {control.get('performance_mode', 'Unknown')}",
+            f"Fans: {fan_control}",
+        )
+    )
+    if fan_control == "Manual" and fan_target is not None:
+        tooltip.append(f"  Target: {fan_target} RPM")
+    if control.get("high_temperature_cooling"):
+        tooltip.append("High-temperature cooling: Active")
+    if control.get("error"):
+        tooltip.extend(("", f"Control error: {html.escape(str(control['error']))}"))
+
+    classes = [gpu_state]
+    temperatures = [float(value) for value in (cpu, gpu_temperature) if value is not None]
+    if control.get("high_temperature_cooling") or not control.get("healthy") or not temperatures:
+        classes.append("critical")
+    elif max(temperatures) >= WAYBAR_CRITICAL_C:
+        classes.append("critical")
+    elif max(temperatures) >= WAYBAR_WARNING_C:
+        classes.append("warning")
+
+    return json.dumps(
+        {"text": text, "tooltip": "\n".join(tooltip), "class": classes},
+        ensure_ascii=False,
+    )
+
+
+def format_waybar_unavailable() -> str:
+    return json.dumps(
+        {
+            "text": f"{THERMOMETER_ICON} unavailable · {FAN_ICON} unavailable",
+            "tooltip": "RZ09-0328 controller unavailable",
+            "class": ["critical"],
+        },
+        ensure_ascii=False,
+    )
+
+
+def temperature(value: object) -> str:
+    if value is None:
+        return "unavailable"
+    return f"{round(float(value))}°C"
+
+
+def value_or_unknown(value: object, suffix: str) -> str:
+    return "unknown" if value is None else f"{value}{suffix}"
+
+
+# Razer HID transport
+
+class RazerHID:
+    def __init__(self, descriptor: int, path: Path) -> None:
+        self.descriptor = descriptor
+        self.path = path
+        self.transaction = 0
+        self.collisions = 0
+
+    @classmethod
+    def open(cls) -> RazerHID:
+        path = find_hidraw()
+        return cls(os.open(path, os.O_RDWR | os.O_CLOEXEC), path)
+
+    def close(self) -> None:
+        try:
+            os.close(self.descriptor)
+        except OSError:
+            pass
+
+    def read_mode(self, target: int) -> tuple[int, int]:
+        response = self.command(COMMAND_GET_MODE, (0, target, 0, 0))
+        return response[11], response[12]
+
+    def set_mode(self, target: int, mode: int, manual: int) -> None:
+        self.command(COMMAND_SET_MODE, (1, target, mode, manual))
+        if self.read_mode(target) != (mode, manual):
+            raise HIDError(f"mode readback failed for target {target}")
+
+    def read_rpm(self, target: int) -> int:
+        response = self.command(COMMAND_GET_RPM, (0, target, 0))
+        return response[11] * 100
+
+    def set_rpm(self, target: int, rpm: int) -> None:
+        units = rpm // 100
+        self.command(COMMAND_SET_RPM, (1, target, units))
+        if self.read_rpm(target) != rpm:
+            raise HIDError(f"RPM readback failed for target {target}")
+
+    def command(self, command_id: int, arguments: tuple[int, ...]) -> bytearray:
+        last_response: bytearray | None = None
+        for _attempt in range(COMMAND_ATTEMPTS):
+            request = self._request(command_id, arguments)
+            fcntl.ioctl(self.descriptor, HIDIOCSFEATURE, request, True)
+            time.sleep(COMMAND_DELAY_SECONDS)
+            response = bytearray(REPORT_BUFFER_SIZE)
+            received = fcntl.ioctl(self.descriptor, HIDIOCGFEATURE, response, True)
+            last_response = response
+            if self._valid_response(received, request, response):
+                return response
+            self.collisions += 1
+            time.sleep(random.uniform(*RETRY_DELAY_RANGE_SECONDS))
+        status = last_response[1] if last_response is not None else None
+        raise HIDError(
+            f"command 0x{command_id:02x} failed after {COMMAND_ATTEMPTS} attempts"
+            + (f" (last status 0x{status:02x})" if status is not None else "")
+        )
+
+    def _request(self, command_id: int, arguments: tuple[int, ...]) -> bytearray:
+        self.transaction = self.transaction % 254 + 1
+        request = bytearray(REPORT_BUFFER_SIZE)
+        request[2] = self.transaction
+        request[6] = len(arguments)
+        request[7] = COMMAND_CLASS
+        request[8] = command_id
+        request[9 : 9 + len(arguments)] = bytes(arguments)
+        request[89] = report_checksum(request)
+        return request
+
+    @staticmethod
+    def _valid_response(received: int, request: bytearray, response: bytearray) -> bool:
+        return (
+            received == REPORT_BUFFER_SIZE
+            and response[0] == 0
+            and response[1] == 2
+            and response[2:9] == request[2:9]
+            and response[9:11] == request[9:11]
+            and response[89] == report_checksum(response)
+            and response[90] == 0
+        )
+
+
+def find_hidraw() -> Path:
+    identity = f"{USB_VENDOR_ID:04X}:{USB_PRODUCT_ID:04X}"
+    for entry in Path("/sys/class/hidraw").glob("hidraw*"):
+        try:
+            device = (entry / "device").resolve()
+            interface = int((device.parent / "bInterfaceNumber").read_text().strip(), 16)
+            if identity in device.name.upper() and interface == USB_INTERFACE:
+                return Path("/dev") / entry.name
+        except (OSError, ValueError):
+            continue
+    raise HIDError(
+        f"USB device {USB_VENDOR_ID:04x}:{USB_PRODUCT_ID:04x} interface {USB_INTERFACE} not found"
+    )
+
+
+def report_checksum(report: bytearray) -> int:
+    checksum = 0
+    for value in report[3:89]:
+        checksum ^= value
+    return checksum
+
+
+# NVML bindings
+
+class NVML:
+    class Utilization(ctypes.Structure):
+        _fields_ = (("gpu", ctypes.c_uint), ("memory", ctypes.c_uint))
+
+    class Memory(ctypes.Structure):
+        _fields_ = (
+            ("total", ctypes.c_ulonglong),
+            ("free", ctypes.c_ulonglong),
+            ("used", ctypes.c_ulonglong),
+        )
+
+    def __init__(self) -> None:
+        self.library: ctypes.CDLL | None = None
+        self.load_error: str | None = None
+        try:
+            library = ctypes.CDLL("libnvidia-ml.so.1")
+            library.nvmlInit_v2.restype = ctypes.c_int
+            library.nvmlShutdown.restype = ctypes.c_int
+            library.nvmlDeviceGetHandleByPciBusId_v2.argtypes = (
+                ctypes.c_char_p,
+                ctypes.POINTER(ctypes.c_void_p),
+            )
+            library.nvmlDeviceGetHandleByPciBusId_v2.restype = ctypes.c_int
+            library.nvmlDeviceGetTemperature.argtypes = (
+                ctypes.c_void_p,
+                ctypes.c_uint,
+                ctypes.POINTER(ctypes.c_uint),
+            )
+            library.nvmlDeviceGetTemperature.restype = ctypes.c_int
+            library.nvmlDeviceGetUtilizationRates.argtypes = (
+                ctypes.c_void_p,
+                ctypes.POINTER(self.Utilization),
+            )
+            library.nvmlDeviceGetUtilizationRates.restype = ctypes.c_int
+            library.nvmlDeviceGetMemoryInfo.argtypes = (
+                ctypes.c_void_p,
+                ctypes.POINTER(self.Memory),
+            )
+            library.nvmlDeviceGetMemoryInfo.restype = ctypes.c_int
+            self.library = library
+        except OSError as error:
+            self.load_error = str(error)
+
+    def sample(self) -> tuple[int, int, int, int]:
+        if self.library is None:
+            raise NVMLFailure(self.load_error or "NVML is unavailable")
+
+        initialized = False
+        try:
+            self._check(self.library.nvmlInit_v2(), "initialization")
+            initialized = True
+            handle = ctypes.c_void_p()
+            self._check(
+                self.library.nvmlDeviceGetHandleByPciBusId_v2(
+                    GPU_NVML_PCI_ADDRESS, ctypes.byref(handle)
+                ),
+                "device lookup",
+            )
+            temperature_c = ctypes.c_uint()
+            utilization = self.Utilization()
+            memory = self.Memory()
+            self._check(
+                self.library.nvmlDeviceGetTemperature(
+                    handle, 0, ctypes.byref(temperature_c)
+                ),
+                "temperature query",
+            )
+            self._check(
+                self.library.nvmlDeviceGetUtilizationRates(
+                    handle, ctypes.byref(utilization)
+                ),
+                "utilization query",
+            )
+            self._check(
+                self.library.nvmlDeviceGetMemoryInfo(handle, ctypes.byref(memory)),
+                "memory query",
+            )
+            return (
+                temperature_c.value,
+                utilization.gpu,
+                memory.used // (1024 * 1024),
+                memory.total // (1024 * 1024),
+            )
+        finally:
+            if initialized:
+                self.library.nvmlShutdown()
+
+    @staticmethod
+    def _check(result: int, operation: str) -> None:
+        if result != 0:
+            raise NVMLFailure(f"NVML {operation} failed with status {result}")
+
+
+class ControlError(RuntimeError):
+    pass
+
+
+class HIDError(RuntimeError):
+    pass
+
+
+class NVMLFailure(RuntimeError):
+    pass
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

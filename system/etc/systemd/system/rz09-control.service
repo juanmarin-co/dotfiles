@@ -1,0 +1,30 @@
+[Unit]
+Description=Razer RZ09-0328 thermal and performance controller
+After=systemd-udevd.service
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/rz09-control daemon
+ExecStopPost=-/usr/local/bin/rz09-control reset
+Restart=on-failure
+RestartSec=2s
+RuntimeDirectory=rz09-control
+RuntimeDirectoryMode=0755
+TimeoutStopSec=10s
+
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=read-only
+ProtectClock=yes
+ProtectControlGroups=yes
+ProtectHostname=yes
+ProtectKernelLogs=yes
+ProtectKernelModules=yes
+ProtectKernelTunables=yes
+LockPersonality=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+
+[Install]
+WantedBy=multi-user.target

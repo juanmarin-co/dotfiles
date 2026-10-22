@@ -11,14 +11,14 @@
         "clock"
     ],
     "modules-right": [
+        "custom/thermals",
+        "cpu",
+        "memory",
+        "network",
         "pulseaudio",
         "backlight",
-        "network",
-        "cpu",
-        "custom/thermals",
-        "memory",
-        "battery",
         "power-profiles-daemon",
+        "battery",
         "custom/dnd",
         "tray"
     ],
@@ -82,9 +82,10 @@
     },
     "custom/thermals": {
         "format": "{}",
+        "align": 1,
         "return-type": "json",
-        "interval": 3,
-        "exec": "~/.config/waybar/scripts/thermals.sh"
+        "restart-interval": 2,
+        "exec": "/usr/local/bin/rz09-control waybar"
     },
     "memory": {
         "format": " {percentage}%"

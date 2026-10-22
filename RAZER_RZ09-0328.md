@@ -70,11 +70,13 @@ Each response echoes the request’s transaction ID, command class, and command 
 | Command ID | Operation | Request arguments | Successful response |
 |---|---|---|---|
 | `0x82` | Read mode and fan control | `[0, target, 0, 0]` | `[0, target, mode, manual]` |
-| `0x02` | Set mode and fan control | `[0, target, mode, manual]` | Acknowledgement; stored state available through `0x82` |
+| `0x02` | Set mode and fan control | `[1, target, mode, manual]` | Acknowledgement; stored state available through `0x82` |
 | `0x81` | Read stored fan target | `[0, target, 0]` | `[0, target, rpm_units]` |
-| `0x01` | Set fan target | `[0, target, rpm_units]` | Acknowledgement; stored target available through `0x81` |
+| `0x01` | Set fan target | `[1, target, rpm_units]` | Acknowledgement; stored target available through `0x81` |
 | `0x87` | Read custom level | `[0, target, 0]` | `[0, target, level]` |
 | `0x07` | Set custom level | `[0, target, level]` | Acknowledgement; stored level available through `0x87` |
+
+The mode and fan-target setters above follow [Synapse product 597’s policy](https://apps.razer.com/synapse/products/597/mw/6737.6da70458ec9e64b00f37.js): setters use profile/class `1`, while getters use `0`. Earlier local tests use `0` for setters and confirm stored-state readback; those tests do not establish equivalence to the vendor sequence. Custom-level examples below retain that earlier test format.
 
 A successful setter acknowledgement confirms acceptance, not the physical effect. The corresponding getter provides stored-state verification independently of the setter’s response arguments.
 
@@ -90,7 +92,7 @@ Command `0x02` sets performance mode and fan control together. A change to one f
 | `0x04` | Custom |
 | `0x05` | Silent |
 
-All listed values are accepted and read back unchanged on both targets. Their distinct power/performance effects remain unmeasured. The Creator and Silent names lack confirmation from model-specific Synapse evidence.
+All listed values are accepted and read back unchanged on both targets. Their distinct power/performance effects remain unmeasured. The [official guide, page 15](https://dl.razer.com/master-guides/RazerSynapse3/Blade-00000597-en.pdf), identifies Balanced as Default, Gaming as Increase Graphics Power, and Creator as Increase Processor Power. Gaming and Creator require external power in Synapse. Custom and Silent remain absent from this model’s vendor-supported preset list despite accepting stored values.
 
 ### Custom Performance Levels
 
@@ -154,6 +156,14 @@ NVML initialization can wake the GPU before any temperature query. To avoid unne
 `fuser` identifies processes with the GPU’s device node open, such as `/dev/nvidia0`, by inspecting `/proc`. This check does not wake a suspended GPU. The monitor and its telemetry subprocesses do not count as other applications.
 
 An open client does not necessarily mean active rendering, and the checks are not atomic. This approach allows suspension in controlled tests but does not guarantee identical behaviour across applications or drivers. When sampling is skipped, GPU temperature is unavailable, not zero.
+
+## Controller Policy
+
+`system/usr/local/bin/rz09-control` selects Gaming when the NVIDIA GPU is D0/active with a client and `/sys/class/power_supply/AC0/online` reads `1`. Otherwise it selects Balanced; missing AC status does not enable Gaming. This checks AC presence, not adapter wattage. The controller applies the EC preset only, not Synapse’s separate Windows GPU/VRAM tuning.
+
+Cooling is independent of performance selection. Both fan channels receive the same target from `max(CPU, available or held GPU temperature)`: automatic below 60°C, 3500 RPM from 60°C, 4000 RPM from 70°C, and 4500 RPM from 80°C, with 2°C downward hysteresis. GPU temperature demand persists for 30 seconds after telemetry disappears.
+
+At 85°C, high-temperature cooling requests 5000 RPM without overriding the selected performance mode. It remains active until the control temperature stays at or below 80°C for 30 seconds. These are policy thresholds, not hardware emergency limits. CPU sensor failure, shutdown, and reset request Balanced/automatic control. Waybar reads the daemon’s status socket and marks latched high-temperature cooling red.
 
 ## Control Lifetime and Recovery
 
