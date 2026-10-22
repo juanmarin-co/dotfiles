@@ -2,9 +2,13 @@ spawn-at-startup "waybar"
 spawn-at-startup "swayidle" "-w"
 spawn-sh-at-startup "swaybg -i ~/Pictures/wallpaper.png -m fill"
 spawn-at-startup "mako"
+spawn-at-startup "/usr/lib/polkit-gnome/polkit-gnome-authentication-agent-1"
 
 environment {
     GTK_IM_MODULE "simple"
+    MOZ_DRM_DEVICE "/dev/dri/renderD128"
+    VK_DRIVER_FILES "/usr/share/vulkan/icd.d/intel_icd.json"
+    __EGL_VENDOR_LIBRARY_FILENAMES "/usr/share/glvnd/egl_vendor.d/50_mesa.json"
 }
 
 input {
@@ -51,6 +55,16 @@ window-rule {
 window-rule {
     match app-id="com.ghostty.nmtui"
     open-floating true
+}
+
+window-rule {
+    match app-id="polkit-gnome-authentication-agent-1"
+    open-floating true
+}
+
+window-rule {
+    match app-id=r#"^steam_app_\d+$"#
+    open-fullscreen true
 }
 
 debug {
