@@ -1,10 +1,10 @@
 # AGENTS.md
 
-This repository stores dotfiles using Git and GNU Stow. Each top-level folder is a package that mirrors paths in `$HOME` using symlinks.
+This repository stores dotfiles using Git and GNU Stow. Top-level folders mirror paths in `$HOME` and are linked with `stow <package>`, with the exception of the `system` package, which mirrors root (`/`) and is linked with `sudo stow -t / system`.
 
 Prefer default settings whenever possible. Add configurations only when the user asks for them, or when a tool requires an explicit config file to work. Keep files lean and focused on what is actually in use. Always use the `dependency-docs` skill to verify options, starting with local `man` pages and `--help`.
 
-To add a tool, mirror its path under a package folder and link it with `stow <package>`. Always ask the user before running `git commit`.
+To add a tool, mirror its path under a package folder and link it. Always ask the user before running `git commit`.
 
 Theme desktop components with [Ayu](https://ayutheme.com/) (Dark variant). Use Inter for UI elements and JetBrains Mono for terminal emulators.
 
