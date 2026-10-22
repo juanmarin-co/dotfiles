@@ -29,6 +29,8 @@ FAN_CURVE = (
 POLL_INTERVAL_SECONDS = 1.0
 VERIFY_INTERVAL_SECONDS = 60.0
 FAN_HYSTERESIS_C = 2.0
+MANUAL_ENTRY_SECONDS = 5.0
+AUTOMATIC_RECOVERY_SECONDS = 30.0
 GPU_DEMAND_HOLD_SECONDS = 30.0
 COOLING_RECOVERY_SECONDS = 30.0
 GPU_CLIENT_POLL_INTERVAL_SECONDS = 3.0
@@ -46,6 +48,7 @@ USB_INTERFACE = 0
 CPU_HWMON_NAME = "coretemp"
 CPU_HWMON_LABEL = "Package id 0"
 AC_ONLINE_PATH = Path("/sys/class/power_supply/AC0/online")
+CPU_NO_TURBO_PATH = Path("/sys/devices/system/cpu/intel_pstate/no_turbo")
 GPU_PCI_ADDRESS = "0000:01:00.0"
 GPU_NVML_PCI_ADDRESS = b"00000000:01:00.0"
 GPU_DEVICE_NODE = Path("/dev/nvidia0")
@@ -124,6 +127,7 @@ class StatusSnapshot:
     ac_online: bool
     gpu: GPUReading
     control: ControlReading
+    cpu_turbo_allowed: bool | None = None
 
 
 # Commands
@@ -162,6 +166,7 @@ def run_daemon() -> int:
             if current_suspend_offset - previous_suspend_offset > 2.0:
                 LOG.info("resume detected; reapplying control policy")
                 controller.invalidate()
+                policy.interrupt_timers()
             previous_suspend_offset = current_suspend_offset
 
             cpu_temp, cpu_error = telemetry.cpu_temperature()
@@ -169,7 +174,7 @@ def run_daemon() -> int:
             ac_online = read_text(AC_ONLINE_PATH, "unknown") == "1"
 
             if cpu_temp is None:
-                policy.recovery_since = None
+                policy = FanPolicy()
                 desired = safe_control()
             else:
                 desired = policy.evaluate(
@@ -181,8 +186,10 @@ def run_daemon() -> int:
                 )
 
             control_error = cpu_error
+            cpu_turbo_allowed = None
             try:
-                controller.ensure(desired)
+                apply_control(controller, desired)
+                cpu_turbo_allowed = desired.mode != MODE_GAMING
             except ControlError as error:
                 control_error = str(error)
                 controller.invalidate()
@@ -199,6 +206,7 @@ def run_daemon() -> int:
                 cpu_temp_c=cpu_temp,
                 ac_online=ac_online,
                 gpu=gpu,
+                cpu_turbo_allowed=cpu_turbo_allowed,
                 control=control_reading(
                     desired,
                     healthy=control_error is None,
@@ -216,6 +224,10 @@ def run_daemon() -> int:
             controller.reset()
         except ControlError as error:
             LOG.error("could not restore Balanced/automatic control: %s", error)
+        try:
+            set_cpu_turbo(True)
+        except ControlError as error:
+            LOG.error("could not allow CPU turbo: %s", error)
         publisher.close()
 
     LOG.info("stopped RZ09-0328 controller")
@@ -249,12 +261,14 @@ def run_waybar() -> int:
 def reset_hardware() -> int:
     logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
     controller = HardwareController()
-    try:
-        controller.reset()
-    except ControlError as error:
-        LOG.error("could not restore Balanced/automatic control: %s", error)
-        return 1
-    return 0
+    failed = False
+    for action in (controller.reset, lambda: set_cpu_turbo(True)):
+        try:
+            action()
+        except ControlError as error:
+            LOG.error("reset failed: %s", error)
+            failed = True
+    return int(failed)
 
 
 def request_stop(_signum: int, _frame: object) -> None:
@@ -272,6 +286,32 @@ def sleep_until_stop(seconds: float) -> None:
 
 
 # Policy and control orchestration
+
+def apply_control(controller: HardwareController, desired: DesiredControl) -> None:
+    # Disable turbo before entering Gaming; allow it only after leaving Gaming.
+    gaming = desired.mode == MODE_GAMING
+    if gaming:
+        set_cpu_turbo(False)
+    controller.ensure(desired)
+    if not gaming:
+        set_cpu_turbo(True)
+
+
+def set_cpu_turbo(allowed: bool) -> None:
+    desired = "0" if allowed else "1"
+    try:
+        current = CPU_NO_TURBO_PATH.read_text().strip()
+        if current not in ("0", "1"):
+            raise ControlError(f"invalid CPU no_turbo value: {current!r}")
+        if current == desired:
+            return
+        CPU_NO_TURBO_PATH.write_text(desired + "\n")
+        if CPU_NO_TURBO_PATH.read_text().strip() != desired:
+            raise ControlError("CPU turbo readback failed")
+    except OSError as error:
+        raise ControlError(f"CPU turbo control failed: {error}") from error
+    LOG.info("CPU turbo %s", "allowed" if allowed else "disabled")
+
 
 def normal_control(
     gaming: bool,
@@ -322,6 +362,13 @@ class FanPolicy:
         self.last_gpu_temperature: float | None = None
         self.high_temperature_cooling = False
         self.recovery_since: float | None = None
+        self.entry_since: float | None = None
+        self.exit_since: float | None = None
+
+    def interrupt_timers(self) -> None:
+        self.recovery_since = None
+        self.entry_since = None
+        self.exit_since = None
 
     def evaluate(
         self,
@@ -342,16 +389,44 @@ class FanPolicy:
         )
 
         self._update_cooling(control_temperature, now)
-        self.fan_demand = (
-            MAXIMUM_FAN_RPM
-            if self.high_temperature_cooling
-            else curve_demand(control_temperature, self.fan_demand)
-        )
+        self.fan_demand = self._fan_target(control_temperature, now)
         return normal_control(
             gpu_in_use and ac_online,
             self.fan_demand,
             self.high_temperature_cooling,
         )
+
+    def _fan_target(self, temperature: float, now: float) -> int | None:
+        minimum_temperature, minimum_rpm = FAN_CURVE[0]
+        if temperature < minimum_temperature - FAN_HYSTERESIS_C:
+            if self.exit_since is None:
+                self.exit_since = now
+        else:
+            self.exit_since = None
+
+        if self.high_temperature_cooling:
+            self.entry_since = None
+            return MAXIMUM_FAN_RPM
+
+        if self.fan_demand is not None:
+            self.entry_since = None
+            if (
+                self.exit_since is not None
+                and now - self.exit_since >= AUTOMATIC_RECOVERY_SECONDS
+            ):
+                return None
+            # Stay manual at the lowest step while waiting for sustained cooling.
+            return curve_demand(temperature, self.fan_demand) or minimum_rpm
+
+        if temperature < minimum_temperature:
+            self.entry_since = None
+            return None
+        if self.entry_since is None:
+            self.entry_since = now
+        if now - self.entry_since < MANUAL_ENTRY_SECONDS:
+            return None
+        self.entry_since = None
+        return step_curve(temperature)
 
     def _gpu_temperature(
         self,
@@ -383,7 +458,6 @@ class FanPolicy:
         if now - self.recovery_since >= COOLING_RECOVERY_SECONDS:
             self.high_temperature_cooling = False
             self.recovery_since = None
-            self.fan_demand = None
 
 
 def curve_demand(temperature: float, previous: int | None) -> int | None:
@@ -703,6 +777,9 @@ def format_waybar(snapshot: dict[str, object]) -> str:
     )
     if fan_control == "Manual" and fan_target is not None:
         tooltip.append(f"  Target: {fan_target} RPM")
+    turbo = snapshot.get("cpu_turbo_allowed")
+    if turbo is not None:
+        tooltip.append("CPU turbo: " + ("Allowed" if turbo else "Disabled"))
     if control.get("high_temperature_cooling"):
         tooltip.append("High-temperature cooling: Active")
     if control.get("error"):
