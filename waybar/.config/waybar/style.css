@@ -36,6 +36,7 @@ window#waybar > box {
 #clock,
 #battery,
 #cpu,
+#custom-thermals,
 #memory,
 #network,
 #pulseaudio,
@@ -52,5 +53,8 @@ window#waybar > box {
 }
 
 /* Status alerts */
-#battery.warning { color: #ffb454; }
-#battery.critical { color: #d95757; }
+#battery.warning,
+#custom-thermals.warning { color: #ffb454; }
+#battery.critical,
+#custom-thermals.critical { color: #d95757; }
+#custom-thermals.D0 { color: #59c2ff; }

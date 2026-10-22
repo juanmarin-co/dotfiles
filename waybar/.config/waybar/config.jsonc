@@ -15,6 +15,7 @@
         "backlight",
         "network",
         "cpu",
+        "custom/thermals",
         "memory",
         "battery",
         "power-profiles-daemon",
@@ -78,6 +79,12 @@
     },
     "cpu": {
         "format": " {usage}%"
+    },
+    "custom/thermals": {
+        "format": "{}",
+        "return-type": "json",
+        "interval": 3,
+        "exec": "~/.config/waybar/scripts/thermals.sh"
     },
     "memory": {
         "format": " {percentage}%"
