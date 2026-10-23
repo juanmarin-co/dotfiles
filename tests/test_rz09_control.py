@@ -187,15 +187,18 @@ class TurboTests(unittest.TestCase):
             with self.assertRaisesRegex(control.ControlError, "readback"):
                 control.set_cpu_turbo(False)
 
-    def test_disable_precedes_gaming_and_enable_follows_balanced(self):
-        for gaming in (True, False):
-            with self.subTest(gaming=gaming):
-                calls = []
-                hardware = Mock()
-                hardware.ensure.side_effect = lambda desired: calls.append("hardware")
-                with patch.object(control, "set_cpu_turbo", side_effect=lambda allowed: calls.append(allowed)):
-                    control.apply_control(hardware, control.normal_control(gaming, 5000))
-                self.assertEqual(calls, [False, "hardware"] if gaming else ["hardware", True])
+    def test_turbo_policy_and_hardware_order_in_both_modes(self):
+        for balanced_turbo in (True, False):
+            for gaming in (True, False):
+                with self.subTest(balanced_turbo=balanced_turbo, gaming=gaming):
+                    calls = []
+                    hardware = Mock()
+                    hardware.ensure.side_effect = lambda desired: calls.append("hardware")
+                    with patch.object(control, "CPU_TURBO_ON_BALANCED", balanced_turbo), patch.object(control, "set_cpu_turbo", side_effect=lambda allowed: calls.append(allowed)):
+                        allowed = control.apply_control(hardware, control.normal_control(gaming, 5000))
+                    expected = balanced_turbo and not gaming
+                    self.assertEqual(allowed, expected)
+                    self.assertEqual(calls, ["hardware", True] if expected else [False, "hardware"])
 
     def test_failed_turbo_disable_blocks_gaming_entry(self):
         hardware = Mock()
@@ -207,18 +210,20 @@ class TurboTests(unittest.TestCase):
     def test_failed_hardware_exit_does_not_enable_turbo_early(self):
         hardware = Mock()
         hardware.ensure.side_effect = control.ControlError("HID failure")
-        with patch.object(control, "set_cpu_turbo") as turbo:
+        with patch.object(control, "CPU_TURBO_ON_BALANCED", True), patch.object(control, "set_cpu_turbo") as turbo:
             with self.assertRaises(control.ControlError):
                 control.apply_control(hardware, control.safe_control())
         turbo.assert_not_called()
 
-    def test_reset_allows_turbo_even_if_hid_reset_fails(self):
-        hardware = Mock()
-        hardware.reset.side_effect = control.ControlError("HID failure")
-        with patch.object(control, "HardwareController", return_value=hardware), patch.object(control, "set_cpu_turbo") as turbo:
-            with self.assertLogs(control.LOG, level="ERROR"):
-                self.assertEqual(control.reset_hardware(), 1)
-        turbo.assert_called_once_with(True)
+    def test_reset_respects_turbo_policy_even_if_hid_reset_fails(self):
+        for balanced_turbo in (True, False):
+            with self.subTest(balanced_turbo=balanced_turbo):
+                hardware = Mock()
+                hardware.reset.side_effect = control.ControlError("HID failure")
+                with patch.object(control, "CPU_TURBO_ON_BALANCED", balanced_turbo), patch.object(control, "HardwareController", return_value=hardware), patch.object(control, "set_cpu_turbo") as turbo:
+                    with self.assertLogs(control.LOG, level="ERROR"):
+                        self.assertEqual(control.reset_hardware(), 1)
+                turbo.assert_called_once_with(balanced_turbo)
 
     def test_waybar_shows_turbo_disabled(self):
         reading = control.control_reading(control.normal_control(True, 3500), healthy=True, error=None, collisions=0)
