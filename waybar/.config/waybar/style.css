@@ -61,6 +61,8 @@ window#waybar > box {
 /* Status alerts */
 #custom-thermals.D0 { color: #59c2ff; }
 #battery.warning,
+#memory.warning,
 #custom-thermals.warning { color: #ffb454; }
 #battery.critical,
+#memory.critical,
 #custom-thermals.critical { color: #d95757; }
