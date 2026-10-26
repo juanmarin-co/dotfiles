@@ -24,7 +24,7 @@ Commands travel inside **HID Feature Reports**, messages for querying or configu
 
 The device exposes three HID interfaces: interface `0` declares keyboard functions, interface `1` declares additional keyboard, media, and system controls, and interface `2` declares mouse-style input and vendor Feature Reports. Despite their different declared capabilities, all three support fan control and switching between Balanced and Gaming performance modes. They access shared settings, not independent copies.
 
-Linux exposes each interface as `/dev/hidrawN`. Vendor ID, product ID, and interface number identify the interface independently of device-node numbering, which can change between boots. Applications exchange reports directly through `ioctl` or through the **hidapi** library.
+Linux exposes each interface as `/dev/hidrawN`. Vendor ID, product ID, and interface number identify the interface independently of device-node numbering, which can change between boots. The daemon selects interface `2`, matching [Synapse product 597’s middleware entry](https://apps.razer.com/synapse/products/597/mw/main.a1e24f33c1759c4315e3.js). Earlier local fan/mode tests used interface `0`; matching the vendor interface does not by itself establish identical physical behavior. Applications exchange reports directly through `ioctl` or through the **hidapi** library.
 
 Access requires read/write permission on the device node. Multiple applications can communicate with the controller, so software should validate responses and handle communication failures.
 
@@ -120,7 +120,7 @@ Write/readback support is verified for all six CPU/GPU settings. Their wattage a
 | `0` | Firmware selects fan speed |
 | `1` | Software supplies the fan target |
 
-A fixed-speed request consists of enabling manual control with `0x02`, followed by setting the target with `0x01`. Clearing the manual flag restores automatic control.
+A fixed-speed request consists of enabling manual control with `0x02`, followed by setting the target with `0x01`. Clearing the manual flag restores automatic control. The daemon follows this order on each target and waits 200 ms after the mode-command acknowledgement before readback, matching the post-command delay in [Synapse’s protocol implementation](https://apps.razer.com/synapse/products/597/mw/rzDevice25.ae57bbfa911460c03510.js). RPM-only updates while already manual do not rewrite the mode or incur this settling delay.
 
 Razer encodes the fan target as **one unsigned byte in 100-RPM units**:
 
@@ -158,6 +158,8 @@ NVML initialization can wake the GPU before any temperature query. To avoid unne
 An open client does not necessarily mean active rendering, and the checks are not atomic. This approach allows suspension in controlled tests but does not guarantee identical behaviour across applications or drivers. When sampling is skipped, GPU temperature is unavailable, not zero.
 
 ## Controller Policy
+
+The policies below are local choices, not a reproduction of Synapse’s automatic behavior. Synapse also checks adapter wattage and forces Balanced/automatic when external power is insufficient; the daemon currently checks only AC presence. Synapse discovers fan IDs from firmware, while this model-specific daemon uses the locally tested targets `1` and `2`. Protocol readback verifies stored settings, not physical fan speed or CPU/GPU power limits. Interface selection, manual-entry ordering, and settling time are aligned with the inspected vendor code; the revised sequence still requires live validation on this unit.
 
 `system/usr/local/bin/rz09-control` selects Gaming when the NVIDIA GPU is D0/active with a client and `/sys/class/power_supply/AC0/online` reads `1`. Otherwise it selects Balanced; missing AC status does not enable Gaming. This checks AC presence, not adapter wattage. The controller applies the EC preset only, not Synapse’s separate Windows GPU/VRAM tuning.
 

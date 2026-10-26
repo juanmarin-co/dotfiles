@@ -289,6 +289,28 @@ class TurboTests(unittest.TestCase):
 
 
 class HardwareControllerTests(unittest.TestCase):
+    def test_manual_entry_sets_mode_before_rpm_on_each_target(self):
+        controller = control.HardwareController()
+        hid = Mock(collisions=0)
+        controller.hid = hid
+        controller.ensure(control.normal_control(False, 3500))
+        self.assertEqual(hid.mock_calls, [
+            unittest.mock.call.set_mode(1, control.MODE_BALANCED, control.MANUAL),
+            unittest.mock.call.set_rpm(1, 3500),
+            unittest.mock.call.set_mode(2, control.MODE_BALANCED, control.MANUAL),
+            unittest.mock.call.set_rpm(2, 3500),
+        ])
+
+    def test_automatic_entry_does_not_write_rpm(self):
+        controller = control.HardwareController()
+        hid = Mock(collisions=0)
+        controller.hid = hid
+        controller.ensure(control.safe_control())
+        self.assertEqual(hid.mock_calls, [
+            unittest.mock.call.set_mode(1, control.MODE_BALANCED, control.AUTOMATIC),
+            unittest.mock.call.set_mode(2, control.MODE_BALANCED, control.AUTOMATIC),
+        ])
+
     def test_manual_rpm_changes_never_rewrite_mode(self):
         controller = control.HardwareController()
         hid = Mock(collisions=0)
@@ -313,6 +335,20 @@ class HardwareControllerTests(unittest.TestCase):
 
 
 class ProtocolTests(unittest.TestCase):
+    def test_uses_synapse_interface(self):
+        self.assertEqual(control.USB_INTERFACE, 2)
+
+    def test_mode_settles_after_acknowledgement_before_readback(self):
+        hid = control.RazerHID(-1, Path("/not-a-device"))
+        events = []
+        with patch.object(hid, "command", side_effect=lambda *args: events.append(("command", args))), patch.object(control.time, "sleep", side_effect=lambda seconds: events.append(("sleep", seconds))), patch.object(hid, "read_mode", side_effect=lambda target: events.append(("read", target)) or (control.MODE_GAMING, control.MANUAL)):
+            hid.set_mode(1, control.MODE_GAMING, control.MANUAL)
+        self.assertEqual(events, [
+            ("command", (control.COMMAND_SET_MODE, (1, 1, control.MODE_GAMING, control.MANUAL))),
+            ("sleep", 0.2),
+            ("read", 1),
+        ])
+
     def test_setters_use_profile_one_getters_use_zero_and_validate_readback(self):
         hid = control.RazerHID(-1, Path("/not-a-device"))
         state = {"mode": (0, 0), "rpm": 0}
@@ -357,7 +393,7 @@ class ProtocolTests(unittest.TestCase):
 
     def test_failed_readback_is_not_reported_as_success(self):
         hid = control.RazerHID(-1, Path("/not-a-device"))
-        with patch.object(hid, "command", return_value=bytearray(91)):
+        with patch.object(hid, "command", return_value=bytearray(91)), patch.object(control.time, "sleep"):
             with self.assertRaises(control.HIDError):
                 hid.set_mode(1, control.MODE_GAMING, control.MANUAL)
             with self.assertRaises(control.HIDError):

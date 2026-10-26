@@ -45,7 +45,7 @@ WAYBAR_CRITICAL_C = HIGH_TEMPERATURE_C
 # Hardware
 USB_VENDOR_ID = 0x1532
 USB_PRODUCT_ID = 0x0255
-USB_INTERFACE = 0
+USB_INTERFACE = 2
 CPU_HWMON_NAME = "coretemp"
 CPU_HWMON_LABEL = "Package id 0"
 AC_ONLINE_PATH = Path("/sys/class/power_supply/AC0/online")
@@ -63,6 +63,7 @@ HIDIOCGFEATURE = 0xC0004807 | (REPORT_BUFFER_SIZE << 16)
 COMMAND_CLASS = 0x0D
 COMMAND_ATTEMPTS = 5
 COMMAND_DELAY_SECONDS = 0.05
+MODE_SETTLE_SECONDS = 0.2
 RETRY_DELAY_RANGE_SECONDS = (0.02, 0.10)
 TARGETS = (1, 2)
 MODE_BALANCED = 0x00
@@ -563,10 +564,12 @@ class HardwareController:
             self.hid = None
 
     def _apply(self, hid: RazerHID, desired: DesiredControl) -> None:
-        if desired.manual:
-            self._set_rpm(hid, desired.target_rpm)
+        if desired.manual and desired.target_rpm is None:
+            raise ControlError("manual fan control requires an RPM target")
         for target in TARGETS:
             hid.set_mode(target, desired.mode, MANUAL if desired.manual else AUTOMATIC)
+            if desired.manual:
+                hid.set_rpm(target, desired.target_rpm)
 
     @staticmethod
     def _set_rpm(hid: RazerHID, rpm: int | None) -> None:
@@ -859,6 +862,8 @@ class RazerHID:
 
     def set_mode(self, target: int, mode: int, manual: int) -> None:
         self.command(COMMAND_SET_MODE, (1, target, mode, manual))
+        # Synapse waits after the mode command completes, before further control.
+        time.sleep(MODE_SETTLE_SECONDS)
         if self.read_mode(target) != (mode, manual):
             raise HIDError(f"mode readback failed for target {target}")
 
