@@ -23,7 +23,8 @@ from pathlib import Path
 FAN_CURVE = (
     (60.0, 3500),
     (70.0, 4000),
-    (80.0, 4500),
+    (75.0, 4500),
+    (80.0, 5000),
 )
 
 POLL_INTERVAL_SECONDS = 1.0
@@ -35,7 +36,6 @@ GPU_DEMAND_HOLD_SECONDS = 30.0
 COOLING_RECOVERY_SECONDS = 30.0
 GPU_CLIENT_POLL_INTERVAL_SECONDS = 3.0
 MAXIMUM_FAN_RPM = 5000
-CPU_TURBO_ON_BALANCED = False
 
 HIGH_TEMPERATURE_C = 85.0
 RECOVERY_TEMPERATURE_C = 80.0
@@ -189,7 +189,7 @@ def run_daemon() -> int:
             control_error = cpu_error
             cpu_turbo_allowed = None
             try:
-                cpu_turbo_allowed = apply_control(controller, desired)
+                cpu_turbo_allowed = apply_control(controller, desired, ac_online)
             except ControlError as error:
                 control_error = str(error)
                 controller.invalidate()
@@ -225,7 +225,7 @@ def run_daemon() -> int:
         except ControlError as error:
             LOG.error("could not restore Balanced/automatic control: %s", error)
         try:
-            set_cpu_turbo(CPU_TURBO_ON_BALANCED)
+            set_cpu_turbo(False)
         except ControlError as error:
             LOG.error("could not apply CPU turbo policy: %s", error)
         publisher.close()
@@ -262,7 +262,7 @@ def reset_hardware() -> int:
     logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
     controller = HardwareController()
     failed = False
-    for action in (controller.reset, lambda: set_cpu_turbo(CPU_TURBO_ON_BALANCED)):
+    for action in (controller.reset, lambda: set_cpu_turbo(False)):
         try:
             action()
         except ControlError as error:
@@ -287,15 +287,26 @@ def sleep_until_stop(seconds: float) -> None:
 
 # Policy and control orchestration
 
-def apply_control(controller: HardwareController, desired: DesiredControl) -> bool:
-    # Disable turbo before hardware changes; allow it only after leaving Gaming.
-    allowed = CPU_TURBO_ON_BALANCED and desired.mode != MODE_GAMING
+def apply_control(
+    controller: HardwareController, desired: DesiredControl, ac_online: bool
+) -> bool:
+    # Turbo requires confirmed AC power and a powered-off GPU, not just Balanced.
+    allowed = ac_online and desired.mode != MODE_GAMING and gpu_powered_off()
     if not allowed:
         set_cpu_turbo(False)
     controller.ensure(desired)
     if allowed:
-        set_cpu_turbo(True)
+        # Fan-mode changes can wake the GPU; do not trust the earlier reading.
+        allowed = gpu_powered_off()
+        set_cpu_turbo(allowed)
     return allowed
+
+
+def gpu_powered_off() -> bool:
+    return (
+        read_text(GPU_SYSFS_DIRECTORY / "power_state", "unknown") == "D3cold"
+        and read_text(GPU_SYSFS_DIRECTORY / "power/runtime_status", "unknown") == "suspended"
+    )
 
 
 def set_cpu_turbo(allowed: bool) -> None:

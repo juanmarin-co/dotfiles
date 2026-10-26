@@ -57,7 +57,7 @@ class PolicyTests(unittest.TestCase):
         desired = policy.evaluate(80, 80, True, True, 62)
         self.assertFalse(desired.high_temperature_cooling)
         self.assertEqual(desired.mode, control.MODE_GAMING)
-        self.assertEqual(desired.target_rpm, 4500)
+        self.assertEqual(desired.target_rpm, 5000)
 
     def test_gpu_temperature_hold_is_independent_of_performance(self):
         policy = control.FanPolicy()
@@ -65,7 +65,7 @@ class PolicyTests(unittest.TestCase):
         policy.evaluate(50, None, True, True, 5)
         desired = policy.evaluate(50, None, False, True, 30)
         self.assertEqual(desired.mode, control.MODE_BALANCED)
-        self.assertEqual(desired.target_rpm, 4500)
+        self.assertEqual(desired.target_rpm, 5000)
         self.assertEqual(policy.evaluate(50, None, False, True, 31).target_rpm, 3500)
         self.assertTrue(policy.evaluate(50, None, False, True, 60).manual)
         self.assertFalse(policy.evaluate(50, None, False, True, 61).manual)
@@ -73,7 +73,12 @@ class PolicyTests(unittest.TestCase):
     def test_curve_and_downward_hysteresis(self):
         policy = control.FanPolicy()
         policy.evaluate(60, None, False, True, 0)
-        for now, (temp, rpm) in enumerate(((60, 3500), (70, 4000), (69, 4000), (67, 3500), (80, 4500)), start=5):
+        steps = (
+            (60, 3500), (70, 4000), (69, 4000), (67, 3500),
+            (75, 4500), (80, 5000), (79, 5000), (78, 5000),
+            (77, 4500), (74, 4500), (73, 4500), (72, 4000),
+        )
+        for now, (temp, rpm) in enumerate(steps, start=5):
             with self.subTest(temp=temp):
                 self.assertEqual(policy.evaluate(temp, None, False, True, now).target_rpm, rpm)
 
@@ -83,7 +88,17 @@ class PolicyTests(unittest.TestCase):
         self.assertFalse(policy.evaluate(80, None, False, True, 4.999).manual)
         desired = policy.evaluate(80, None, False, True, 5)
         self.assertEqual(desired.mode, control.MODE_BALANCED)
-        self.assertEqual(desired.target_rpm, 4500)
+        self.assertEqual(desired.target_rpm, 5000)
+
+    def test_new_curve_uses_hotter_sensor_without_latching_high_temperature_cooling(self):
+        for temp, rpm in ((60, 3500), (70, 4000), (75, 4500), (80, 5000), (84, 5000)):
+            for cpu, gpu in ((temp, 50), (50, temp)):
+                with self.subTest(cpu=cpu, gpu=gpu):
+                    policy = control.FanPolicy()
+                    policy.evaluate(cpu, gpu, True, True, 0)
+                    desired = policy.evaluate(cpu, gpu, True, True, 5)
+                    self.assertEqual(desired.target_rpm, rpm)
+                    self.assertFalse(desired.high_temperature_cooling)
 
     def test_brief_spike_resets_manual_entry_timer(self):
         policy = control.FanPolicy()
@@ -187,49 +202,90 @@ class TurboTests(unittest.TestCase):
             with self.assertRaisesRegex(control.ControlError, "readback"):
                 control.set_cpu_turbo(False)
 
+    def test_gpu_off_requires_d3cold_and_runtime_suspension(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory)
+            (path / "power").mkdir()
+            with patch.object(control, "GPU_SYSFS_DIRECTORY", path):
+                self.assertFalse(control.gpu_powered_off())
+                for power in ("D0", "D3hot", "D3cold", "unknown"):
+                    for runtime in ("active", "suspended", "suspending", "resuming", "unknown"):
+                        with self.subTest(power=power, runtime=runtime):
+                            (path / "power_state").write_text(power + "\n")
+                            (path / "power/runtime_status").write_text(runtime + "\n")
+                            self.assertEqual(control.gpu_powered_off(), power == "D3cold" and runtime == "suspended")
+                (path / "power_state").write_text("D3cold\n")
+                (path / "power/runtime_status").unlink()
+                self.assertFalse(control.gpu_powered_off())
+
     def test_turbo_policy_and_hardware_order_in_both_modes(self):
-        for balanced_turbo in (True, False):
-            for gaming in (True, False):
-                with self.subTest(balanced_turbo=balanced_turbo, gaming=gaming):
-                    calls = []
-                    hardware = Mock()
-                    hardware.ensure.side_effect = lambda desired: calls.append("hardware")
-                    with patch.object(control, "CPU_TURBO_ON_BALANCED", balanced_turbo), patch.object(control, "set_cpu_turbo", side_effect=lambda allowed: calls.append(allowed)):
-                        allowed = control.apply_control(hardware, control.normal_control(gaming, 5000))
-                    expected = balanced_turbo and not gaming
-                    self.assertEqual(allowed, expected)
-                    self.assertEqual(calls, ["hardware", True] if expected else [False, "hardware"])
+        for ac_online in (True, False):
+            for gpu_off in (True, False):
+                for gaming in (True, False):
+                    with self.subTest(ac_online=ac_online, gpu_off=gpu_off, gaming=gaming):
+                        calls = []
+                        hardware = Mock()
+                        hardware.ensure.side_effect = lambda desired: calls.append("hardware")
+                        with patch.object(control, "gpu_powered_off", return_value=gpu_off), patch.object(control, "set_cpu_turbo", side_effect=lambda allowed: calls.append(allowed)):
+                            allowed = control.apply_control(hardware, control.normal_control(gaming, 5000), ac_online)
+                        expected = ac_online and gpu_off and not gaming
+                        self.assertEqual(allowed, expected)
+                        self.assertEqual(calls, ["hardware", True] if expected else [False, "hardware"])
+
+    def test_fan_mode_gpu_wakeup_prevents_turbo_enable(self):
+        with patch.object(control, "gpu_powered_off", side_effect=(True, False)), patch.object(control, "set_cpu_turbo") as turbo:
+            allowed = control.apply_control(Mock(), control.normal_control(False, 3500), True)
+        self.assertFalse(allowed)
+        turbo.assert_called_once_with(False)
+
+    def test_turbo_tracks_gpu_transitions_without_mode_changes(self):
+        hardware = Mock()
+        desired = control.normal_control(False, 3500)
+        with patch.object(control, "gpu_powered_off", side_effect=(True, True, False, True, True)), patch.object(control, "set_cpu_turbo") as turbo:
+            self.assertTrue(control.apply_control(hardware, desired, True))
+            self.assertFalse(control.apply_control(hardware, desired, True))
+            self.assertTrue(control.apply_control(hardware, desired, True))
+        self.assertEqual([call.args for call in turbo.call_args_list], [(True,), (False,), (True,)])
+
+    def test_turbo_tracks_ac_transitions_without_mode_changes(self):
+        hardware = Mock()
+        desired = control.normal_control(False, 3500)
+        with patch.object(control, "gpu_powered_off", return_value=True), patch.object(control, "set_cpu_turbo") as turbo:
+            self.assertTrue(control.apply_control(hardware, desired, True))
+            self.assertFalse(control.apply_control(hardware, desired, False))
+            self.assertTrue(control.apply_control(hardware, desired, True))
+        self.assertEqual([call.args for call in turbo.call_args_list], [(True,), (False,), (True,)])
 
     def test_failed_turbo_disable_blocks_gaming_entry(self):
         hardware = Mock()
         with patch.object(control, "set_cpu_turbo", side_effect=control.ControlError("denied")):
             with self.assertRaises(control.ControlError):
-                control.apply_control(hardware, control.normal_control(True, 3500))
+                control.apply_control(hardware, control.normal_control(True, 3500), True)
         hardware.ensure.assert_not_called()
 
     def test_failed_hardware_exit_does_not_enable_turbo_early(self):
         hardware = Mock()
         hardware.ensure.side_effect = control.ControlError("HID failure")
-        with patch.object(control, "CPU_TURBO_ON_BALANCED", True), patch.object(control, "set_cpu_turbo") as turbo:
+        with patch.object(control, "gpu_powered_off", return_value=True), patch.object(control, "set_cpu_turbo") as turbo:
             with self.assertRaises(control.ControlError):
-                control.apply_control(hardware, control.safe_control())
+                control.apply_control(hardware, control.safe_control(), True)
         turbo.assert_not_called()
 
-    def test_reset_respects_turbo_policy_even_if_hid_reset_fails(self):
-        for balanced_turbo in (True, False):
-            with self.subTest(balanced_turbo=balanced_turbo):
-                hardware = Mock()
-                hardware.reset.side_effect = control.ControlError("HID failure")
-                with patch.object(control, "CPU_TURBO_ON_BALANCED", balanced_turbo), patch.object(control, "HardwareController", return_value=hardware), patch.object(control, "set_cpu_turbo") as turbo:
-                    with self.assertLogs(control.LOG, level="ERROR"):
-                        self.assertEqual(control.reset_hardware(), 1)
-                turbo.assert_called_once_with(balanced_turbo)
+    def test_reset_disables_turbo_even_if_hid_reset_fails(self):
+        hardware = Mock()
+        hardware.reset.side_effect = control.ControlError("HID failure")
+        with patch.object(control, "HardwareController", return_value=hardware), patch.object(control, "set_cpu_turbo") as turbo:
+            with self.assertLogs(control.LOG, level="ERROR"):
+                self.assertEqual(control.reset_hardware(), 1)
+        turbo.assert_called_once_with(False)
 
-    def test_waybar_shows_turbo_disabled(self):
-        reading = control.control_reading(control.normal_control(True, 3500), healthy=True, error=None, collisions=0)
-        snapshot = control.StatusSnapshot(0, 70, True, control.GPUReading(), reading, False)
-        tooltip = json.loads(control.format_waybar(asdict(snapshot)))["tooltip"]
-        self.assertIn("CPU turbo: Disabled", tooltip)
+    def test_waybar_shows_turbo_policy(self):
+        reading = control.control_reading(control.normal_control(False, 3500), healthy=True, error=None, collisions=0)
+        for allowed in (False, True):
+            with self.subTest(allowed=allowed):
+                snapshot = control.StatusSnapshot(0, 70, True, control.GPUReading(), reading, allowed)
+                tooltip = json.loads(control.format_waybar(asdict(snapshot)))["tooltip"]
+                self.assertIn("CPU turbo: " + ("Allowed" if allowed else "Disabled"), tooltip)
 
 
 class HardwareControllerTests(unittest.TestCase):
