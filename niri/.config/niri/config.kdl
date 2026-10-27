@@ -1,7 +1,6 @@
-spawn-at-startup "waybar"
+spawn-at-startup "qs" "--no-duplicate"
 spawn-at-startup "swayidle" "-w"
 spawn-sh-at-startup "swaybg -i ~/Pictures/wallpaper.png -m fill"
-spawn-at-startup "mako"
 spawn-at-startup "/usr/lib/polkit-gnome/polkit-gnome-authentication-agent-1"
 
 environment {
@@ -35,8 +34,8 @@ layout {
 
     focus-ring {
         width 1
-        active-color "#e6b450"
-        inactive-color "#5a6378"
+        active-color "#565b66"
+        inactive-color "#273344"
     }
 
     border { off; }
@@ -82,7 +81,7 @@ binds {
     // Applications.
     Mod+1 { spawn-sh "~/.config/niri/scripts/focus-or-launch firefox"; }
     Mod+2 { spawn-sh "~/.config/niri/scripts/focus-or-launch com.mitchellh.ghostty ghostty"; }
-    Mod+Space { spawn "fuzzel"; }
+    Mod+Space { spawn "qs" "ipc" "call" "launcher" "toggle"; }
     Super+Alt+L { spawn "swaylock" "-f" "-c" "000000"; }
 
     // H/L navigates columns. J/K traverses a stack, then the adjacent workspace.

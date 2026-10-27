@@ -6,7 +6,6 @@ from __future__ import annotations
 import argparse
 import ctypes
 import fcntl
-import html
 import json
 import logging
 import os
@@ -39,8 +38,6 @@ MAXIMUM_FAN_RPM = 5000
 
 HIGH_TEMPERATURE_C = 85.0
 RECOVERY_TEMPERATURE_C = 80.0
-WAYBAR_WARNING_C = 70.0
-WAYBAR_CRITICAL_C = HIGH_TEMPERATURE_C
 
 # Hardware
 USB_VENDOR_ID = 0x1532
@@ -75,12 +72,10 @@ COMMAND_SET_MODE = 0x02
 COMMAND_GET_RPM = 0x81
 COMMAND_SET_RPM = 0x01
 
-# Runtime and presentation
+# Status publication
 STATUS_SOCKET = Path("/run/rz09-control/status.sock")
 MAX_STATUS_SUBSCRIBERS = 8
 SOCKET_SEND_TIMEOUT_SECONDS = 0.05
-FAN_ICON = ""
-THERMOMETER_ICON = ""
 
 LOG = logging.getLogger("rz09-control")
 STOP_REQUESTED = False
@@ -93,6 +88,8 @@ class DesiredControl:
     manual: bool
     target_rpm: int | None
     high_temperature_cooling: bool = False
+    fan_reason: str = "firmware"
+    control_temp_c: float | None = None
 
     def key(self) -> tuple[object, ...]:
         return self.mode, self.manual, self.target_rpm
@@ -117,32 +114,39 @@ class ControlReading:
     fan_control: str = "Unknown"
     fan_target_rpm: int | None = None
     high_temperature_cooling: bool = False
+    fan_reason: str = "unknown"
+    control_temp_c: float | None = None
     healthy: bool = False
     error: str | None = None
     collisions: int = 0
+
+
+@dataclass(frozen=True)
+class TurboReading:
+    allowed: bool
+    reason: str
 
 
 @dataclass
 class StatusSnapshot:
     timestamp: float
     cpu_temp_c: float | None
-    ac_online: bool
+    ac_online: bool | None
     gpu: GPUReading
     control: ControlReading
     cpu_turbo_allowed: bool | None = None
+    cpu_turbo_reason: str = "unknown"
 
 
 # Commands
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("command", choices=("daemon", "waybar", "reset"))
+    parser.add_argument("command", choices=("daemon", "reset"))
     args = parser.parse_args()
 
     if args.command == "daemon":
         return run_daemon()
-    if args.command == "waybar":
-        return run_waybar()
     return reset_hardware()
 
 
@@ -173,7 +177,7 @@ def run_daemon() -> int:
 
             cpu_temp, cpu_error = telemetry.cpu_temperature()
             gpu = telemetry.gpu_reading()
-            ac_online = read_text(AC_ONLINE_PATH, "unknown") == "1"
+            ac_online = read_ac_online()
 
             if cpu_temp is None:
                 policy = FanPolicy()
@@ -183,14 +187,17 @@ def run_daemon() -> int:
                     cpu_temp,
                     gpu.temperature_c,
                     gpu.in_use,
-                    ac_online,
+                    ac_online is True,
                     time.monotonic(),
                 )
 
             control_error = cpu_error
             cpu_turbo_allowed = None
+            cpu_turbo_reason = "control_error"
             try:
-                cpu_turbo_allowed = apply_control(controller, desired, ac_online)
+                turbo = apply_control(controller, desired, ac_online)
+                cpu_turbo_allowed = turbo.allowed
+                cpu_turbo_reason = turbo.reason
             except ControlError as error:
                 control_error = str(error)
                 controller.invalidate()
@@ -208,6 +215,7 @@ def run_daemon() -> int:
                 ac_online=ac_online,
                 gpu=gpu,
                 cpu_turbo_allowed=cpu_turbo_allowed,
+                cpu_turbo_reason=cpu_turbo_reason,
                 control=control_reading(
                     desired,
                     healthy=control_error is None,
@@ -233,30 +241,6 @@ def run_daemon() -> int:
 
     LOG.info("stopped RZ09-0328 controller")
     return 0
-
-
-def run_waybar() -> int:
-    try:
-        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as connection:
-            connection.connect(str(STATUS_SOCKET))
-            with connection.makefile("r", encoding="utf-8") as stream:
-                for line in stream:
-                    try:
-                        snapshot = json.loads(line)
-                        print(format_waybar(snapshot), flush=True)
-                    except (KeyError, TypeError, ValueError, json.JSONDecodeError):
-                        continue
-    except BrokenPipeError:
-        sys.stdout = open(os.devnull, "w", encoding="utf-8")
-        return 0
-    except (FileNotFoundError, ConnectionError, OSError):
-        try:
-            print(format_waybar_unavailable(), flush=True)
-        except BrokenPipeError:
-            sys.stdout = open(os.devnull, "w", encoding="utf-8")
-            return 0
-        return 1
-    return 1
 
 
 def reset_hardware() -> int:
@@ -289,10 +273,18 @@ def sleep_until_stop(seconds: float) -> None:
 # Policy and control orchestration
 
 def apply_control(
-    controller: HardwareController, desired: DesiredControl, ac_online: bool
-) -> bool:
-    # Turbo requires confirmed AC power and a powered-off GPU, not just Balanced.
-    allowed = ac_online and desired.mode != MODE_GAMING and gpu_powered_off()
+    controller: HardwareController, desired: DesiredControl, ac_online: bool | None
+) -> TurboReading:
+    # Record the reason from the same decision that controls turbo, without extra GPU queries.
+    if ac_online is not True:
+        allowed = False
+        reason = "ac_unknown" if ac_online is None else "on_battery"
+    elif desired.mode == MODE_GAMING:
+        allowed = False
+        reason = "gaming_mode"
+    else:
+        allowed = gpu_powered_off()
+        reason = "ac_and_gpu_off" if allowed else "gpu_not_confirmed_off"
     if not allowed:
         set_cpu_turbo(False)
     controller.ensure(desired)
@@ -300,7 +292,12 @@ def apply_control(
         # Fan-mode changes can wake the GPU; do not trust the earlier reading.
         allowed = gpu_powered_off()
         set_cpu_turbo(allowed)
-    return allowed
+        reason = "ac_and_gpu_off" if allowed else "gpu_not_confirmed_off"
+    return TurboReading(allowed, reason)
+
+
+def read_ac_online() -> bool | None:
+    return {"1": True, "0": False}.get(read_text(AC_ONLINE_PATH, "unknown"))
 
 
 def gpu_powered_off() -> bool:
@@ -330,6 +327,9 @@ def normal_control(
     gaming: bool,
     target_rpm: int | None,
     high_temperature_cooling: bool = False,
+    *,
+    fan_reason: str | None = None,
+    control_temp_c: float | None = None,
 ) -> DesiredControl:
     return DesiredControl(
         mode=MODE_GAMING if gaming else MODE_BALANCED,
@@ -337,6 +337,9 @@ def normal_control(
         manual=target_rpm is not None,
         target_rpm=target_rpm,
         high_temperature_cooling=high_temperature_cooling,
+        fan_reason=fan_reason or ("high_temperature" if high_temperature_cooling
+                                  else "temperature_curve" if target_rpm is not None else "firmware"),
+        control_temp_c=control_temp_c,
     )
 
 
@@ -357,12 +360,14 @@ def control_reading(
     collisions: int,
 ) -> ControlReading:
     if not healthy:
-        return ControlReading(error=error, collisions=collisions)
+        return ControlReading(fan_reason="control_error", error=error, collisions=collisions)
     return ControlReading(
         performance_mode=desired.mode_name,
         fan_control="Manual" if desired.manual else "Automatic",
         fan_target_rpm=desired.target_rpm,
         high_temperature_cooling=desired.high_temperature_cooling,
+        fan_reason=desired.fan_reason,
+        control_temp_c=desired.control_temp_c,
         healthy=True,
         collisions=collisions,
     )
@@ -403,10 +408,23 @@ class FanPolicy:
 
         self._update_cooling(control_temperature, now)
         self.fan_demand = self._fan_target(control_temperature, now)
+        if self.high_temperature_cooling:
+            reason = "high_temperature_recovery" if self.recovery_since is not None else "high_temperature"
+        elif self.fan_demand is not None:
+            if self.exit_since is not None:
+                reason = "cooldown"
+            elif gpu_temperature is None and held_gpu_temperature is not None and held_gpu_temperature > cpu_temperature:
+                reason = "gpu_temperature_hold"
+            else:
+                reason = "temperature_curve"
+        else:
+            reason = "warming_up" if self.entry_since is not None else "firmware"
         return normal_control(
             gpu_in_use and ac_online,
             self.fan_demand,
             self.high_temperature_cooling,
+            fan_reason=reason,
+            control_temp_c=control_temperature,
         )
 
     def _fan_target(self, temperature: float, now: float) -> int | None:
@@ -740,100 +758,6 @@ class StatusPublisher:
                 return
             subscriber.settimeout(SOCKET_SEND_TIMEOUT_SECONDS)
             self.subscribers.append(subscriber)
-
-
-# Waybar formatting
-
-def format_waybar(snapshot: dict[str, object]) -> str:
-    cpu = snapshot.get("cpu_temp_c")
-    gpu = snapshot["gpu"]
-    control = snapshot["control"]
-    if not isinstance(gpu, dict) or not isinstance(control, dict):
-        raise TypeError("invalid status snapshot")
-
-    gpu_temperature = gpu.get("temperature_c")
-    gpu_state = str(gpu.get("power_state") or "unknown")
-    gpu_display = temperature(gpu_temperature) if gpu_temperature is not None else gpu_state
-
-    fan_control = str(control.get("fan_control") or "Unknown")
-    fan_target = control.get("fan_target_rpm")
-    if fan_control == "Manual" and fan_target:
-        fan_display = f"{fan_target} RPM"
-    elif fan_control == "Automatic":
-        fan_display = "Auto"
-    else:
-        fan_display = fan_control
-    text = f"{THERMOMETER_ICON} {temperature(cpu)} · {gpu_display} · {FAN_ICON} {fan_display}"
-
-    tooltip = [f"CPU: {temperature(cpu)}", f"NVIDIA GPU: {gpu_state}"]
-    if gpu_temperature is not None:
-        tooltip.extend(
-            (
-                f"  Temperature: {temperature(gpu_temperature)}",
-                f"  Usage: {value_or_unknown(gpu.get('utilization_percent'), '%')}",
-                "  VRAM: "
-                f"{value_or_unknown(gpu.get('memory_used_mb'), '')} / "
-                f"{value_or_unknown(gpu.get('memory_total_mb'), ' MB')}",
-                "  Active by: " + ", ".join(
-                    html.escape(str(name)) for name in (gpu.get("clients") or ["client"])
-                ),
-            )
-        )
-    if gpu.get("error"):
-        tooltip.append(f"  Error: {html.escape(str(gpu['error']))}")
-
-    tooltip.extend(
-        (
-            "",
-            "Power: " + ("AC" if snapshot.get("ac_online") else "Battery / AC unconfirmed"),
-            f"Performance: {control.get('performance_mode', 'Unknown')}",
-            f"Fans: {fan_control}",
-        )
-    )
-    if fan_control == "Manual" and fan_target is not None:
-        tooltip.append(f"  Target: {fan_target} RPM")
-    turbo = snapshot.get("cpu_turbo_allowed")
-    if turbo is not None:
-        tooltip.append("CPU turbo: " + ("Allowed" if turbo else "Disabled"))
-    if control.get("high_temperature_cooling"):
-        tooltip.append("High-temperature cooling: Active")
-    if control.get("error"):
-        tooltip.extend(("", f"Control error: {html.escape(str(control['error']))}"))
-
-    classes = [gpu_state]
-    temperatures = [float(value) for value in (cpu, gpu_temperature) if value is not None]
-    if control.get("high_temperature_cooling") or not control.get("healthy") or not temperatures:
-        classes.append("critical")
-    elif max(temperatures) >= WAYBAR_CRITICAL_C:
-        classes.append("critical")
-    elif max(temperatures) >= WAYBAR_WARNING_C:
-        classes.append("warning")
-
-    return json.dumps(
-        {"text": text, "tooltip": "\n".join(tooltip), "class": classes},
-        ensure_ascii=False,
-    )
-
-
-def format_waybar_unavailable() -> str:
-    return json.dumps(
-        {
-            "text": f"{THERMOMETER_ICON} unavailable · {FAN_ICON} unavailable",
-            "tooltip": "RZ09-0328 controller unavailable",
-            "class": ["critical"],
-        },
-        ensure_ascii=False,
-    )
-
-
-def temperature(value: object) -> str:
-    if value is None:
-        return "unavailable"
-    return f"{round(float(value))}°C"
-
-
-def value_or_unknown(value: object, suffix: str) -> str:
-    return "unknown" if value is None else f"{value}{suffix}"
 
 
 # Razer HID transport

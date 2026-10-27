@@ -8,14 +8,14 @@ To add a tool, mirror its path under a package folder and link it. Always ask th
 
 Theme desktop components with [Ayu](https://ayutheme.com/) (Dark variant). Use Inter for UI elements and JetBrains Mono for terminal emulators.
 
+Quickshell provides the bar, launcher, and notifications. Prefer Quickshell’s built-in APIs over external scripts, and reuse existing UI components and styling instead of duplicating them.
+
 ## Tools of Interest
 
 | Tool | Homepage / Docs | Git Repository |
 | :--- | :--- | :--- |
 | Niri | [niri-wm.github.io/niri](https://niri-wm.github.io/niri/) | [YaLTeR/niri](https://github.com/YaLTeR/niri) |
-| Waybar | [github.com/Alexays/Waybar](https://github.com/Alexays/Waybar) | [Alexays/Waybar](https://github.com/Alexays/Waybar) |
-| Fuzzel | [codeberg.org/dnkl/fuzzel](https://codeberg.org/dnkl/fuzzel) | [dnkl/fuzzel](https://codeberg.org/dnkl/fuzzel) |
-| Mako | [mako-project.org](https://mako-project.org/) | [emersion/mako](https://github.com/emersion/mako) |
+| Quickshell | [quickshell.org](https://quickshell.org/) | [quickshell-mirror/quickshell](https://github.com/quickshell-mirror/quickshell) |
 | swaybg | [github.com/swaywm/swaybg](https://github.com/swaywm/swaybg) | [swaywm/swaybg](https://github.com/swaywm/swaybg) |
 | swaylock | [github.com/swaywm/swaylock](https://github.com/swaywm/swaylock) | [swaywm/swaylock](https://github.com/swaywm/swaylock) |
 | swayidle | [github.com/swaywm/swayidle](https://github.com/swaywm/swayidle) | [swaywm/swayidle](https://github.com/swaywm/swayidle) |

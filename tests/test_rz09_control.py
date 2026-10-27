@@ -3,6 +3,7 @@
 import importlib.machinery
 import importlib.util
 import json
+import socket
 import sys
 import tempfile
 import unittest
@@ -151,18 +152,68 @@ class PolicyTests(unittest.TestCase):
         self.assertFalse(desired.manual)
         self.assertFalse(desired.high_temperature_cooling)
 
-    def test_waybar_names_and_highlights_latched_cooling(self):
+    def test_status_reports_latched_cooling_below_entry_temperature(self):
         desired = control.FanPolicy().evaluate(85, 75, True, True, 0)
         reading = control.control_reading(desired, healthy=True, error=None, collisions=0)
-        snapshot = control.StatusSnapshot(0, 79, True, control.GPUReading(), reading)
-        formatted = json.loads(control.format_waybar(asdict(snapshot)))
-        self.assertIn("critical", formatted["class"])
-        self.assertIn("High-temperature cooling: Active", formatted["tooltip"])
-        self.assertIn("Power: AC", formatted["tooltip"])
-        self.assertNotIn("Emergency", formatted["tooltip"])
+        snapshot = json.loads(json.dumps(asdict(control.StatusSnapshot(0, 79, True, control.GPUReading(), reading))))
+        self.assertTrue(snapshot["control"]["high_temperature_cooling"])
+        self.assertEqual(snapshot["control"]["fan_target_rpm"], 5000)
+        self.assertEqual(snapshot["cpu_temp_c"], 79)
+        self.assertTrue(snapshot["ac_online"])
 
-    def test_missing_ac_read_is_not_online(self):
-        self.assertNotEqual(control.read_text(Path("/nonexistent-rz09-test/online"), "unknown"), "1")
+    def test_ac_read_distinguishes_battery_from_unknown(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "online"
+            with patch.object(control, "AC_ONLINE_PATH", path):
+                self.assertIsNone(control.read_ac_online())
+                for value, expected in (("1", True), ("0", False), ("unknown", None), ("", None), ("2", None)):
+                    with self.subTest(value=value):
+                        path.write_text(value + "\n")
+                        self.assertIs(control.read_ac_online(), expected)
+
+
+class PolicyReasonTests(unittest.TestCase):
+    def test_curve_entry_and_recovery_reasons_follow_existing_timers(self):
+        policy = control.FanPolicy()
+        for now, temperature, reason, rpm in (
+            (0, 50, "firmware", None), (1, 70, "warming_up", None),
+            (6, 70, "temperature_curve", 4000), (7, 50, "cooldown", 3500),
+            (37, 50, "firmware", None),
+        ):
+            with self.subTest(reason=reason):
+                desired = policy.evaluate(temperature, None, False, True, now)
+                self.assertEqual(desired.fan_reason, reason)
+                self.assertEqual(desired.control_temp_c, temperature)
+                self.assertEqual(desired.target_rpm, rpm)
+
+    def test_gpu_hold_reason_uses_the_actual_retained_temperature(self):
+        policy = control.FanPolicy()
+        policy.evaluate(50, 84, True, True, 0)
+        for now in (5, 30):
+            desired = policy.evaluate(50, None, False, True, now)
+            self.assertEqual(desired.fan_reason, "gpu_temperature_hold")
+            self.assertEqual(desired.control_temp_c, 84)
+            self.assertEqual(desired.target_rpm, 5000)
+        desired = policy.evaluate(50, None, False, True, 31)
+        self.assertEqual(desired.fan_reason, "cooldown")
+        self.assertEqual(desired.control_temp_c, 50)
+        self.assertEqual(desired.target_rpm, 3500)
+
+    def test_high_temperature_recovery_reason_resets_when_heat_returns(self):
+        policy = control.FanPolicy()
+        for now, temperature, reason in (
+            (0, 85, "high_temperature"), (1, 79, "high_temperature_recovery"),
+            (10, 81, "high_temperature"), (11, 79, "high_temperature_recovery"),
+            (41, 79, "temperature_curve"),
+        ):
+            desired = policy.evaluate(temperature, None, False, True, now)
+            self.assertEqual(desired.fan_reason, reason)
+        reading = control.control_reading(desired, healthy=True, error=None, collisions=0)
+        self.assertEqual(reading.fan_reason, desired.fan_reason)
+        self.assertEqual(reading.control_temp_c, 79)
+        failure = control.control_reading(desired, healthy=False, error="HID failure", collisions=0)
+        self.assertEqual(failure.fan_reason, "control_error")
+        self.assertEqual(failure.fan_control, "Unknown")
 
 
 class TurboTests(unittest.TestCase):
@@ -219,41 +270,46 @@ class TurboTests(unittest.TestCase):
                 self.assertFalse(control.gpu_powered_off())
 
     def test_turbo_policy_and_hardware_order_in_both_modes(self):
-        for ac_online in (True, False):
+        for ac_online in (True, False, None):
             for gpu_off in (True, False):
                 for gaming in (True, False):
                     with self.subTest(ac_online=ac_online, gpu_off=gpu_off, gaming=gaming):
                         calls = []
                         hardware = Mock()
                         hardware.ensure.side_effect = lambda desired: calls.append("hardware")
-                        with patch.object(control, "gpu_powered_off", return_value=gpu_off), patch.object(control, "set_cpu_turbo", side_effect=lambda allowed: calls.append(allowed)):
-                            allowed = control.apply_control(hardware, control.normal_control(gaming, 5000), ac_online)
-                        expected = ac_online and gpu_off and not gaming
-                        self.assertEqual(allowed, expected)
+                        with patch.object(control, "gpu_powered_off", return_value=gpu_off) as gpu_read, patch.object(control, "set_cpu_turbo", side_effect=lambda allowed: calls.append(allowed)):
+                            turbo = control.apply_control(hardware, control.normal_control(gaming, 5000), ac_online)
+                        expected = ac_online is True and gpu_off and not gaming
+                        reason = ("ac_unknown" if ac_online is None else "on_battery" if not ac_online
+                                  else "gaming_mode" if gaming else "ac_and_gpu_off" if gpu_off else "gpu_not_confirmed_off")
+                        self.assertIs(turbo.allowed, expected)
+                        self.assertEqual(turbo.reason, reason)
                         self.assertEqual(calls, ["hardware", True] if expected else [False, "hardware"])
+                        self.assertEqual(gpu_read.call_count, 2 if expected else 1 if ac_online is True and not gaming else 0)
 
     def test_fan_mode_gpu_wakeup_prevents_turbo_enable(self):
         with patch.object(control, "gpu_powered_off", side_effect=(True, False)), patch.object(control, "set_cpu_turbo") as turbo:
-            allowed = control.apply_control(Mock(), control.normal_control(False, 3500), True)
-        self.assertFalse(allowed)
+            reading = control.apply_control(Mock(), control.normal_control(False, 3500), True)
+        self.assertFalse(reading.allowed)
+        self.assertEqual(reading.reason, "gpu_not_confirmed_off")
         turbo.assert_called_once_with(False)
 
     def test_turbo_tracks_gpu_transitions_without_mode_changes(self):
         hardware = Mock()
         desired = control.normal_control(False, 3500)
         with patch.object(control, "gpu_powered_off", side_effect=(True, True, False, True, True)), patch.object(control, "set_cpu_turbo") as turbo:
-            self.assertTrue(control.apply_control(hardware, desired, True))
-            self.assertFalse(control.apply_control(hardware, desired, True))
-            self.assertTrue(control.apply_control(hardware, desired, True))
+            self.assertTrue(control.apply_control(hardware, desired, True).allowed)
+            self.assertFalse(control.apply_control(hardware, desired, True).allowed)
+            self.assertTrue(control.apply_control(hardware, desired, True).allowed)
         self.assertEqual([call.args for call in turbo.call_args_list], [(True,), (False,), (True,)])
 
     def test_turbo_tracks_ac_transitions_without_mode_changes(self):
         hardware = Mock()
         desired = control.normal_control(False, 3500)
         with patch.object(control, "gpu_powered_off", return_value=True), patch.object(control, "set_cpu_turbo") as turbo:
-            self.assertTrue(control.apply_control(hardware, desired, True))
-            self.assertFalse(control.apply_control(hardware, desired, False))
-            self.assertTrue(control.apply_control(hardware, desired, True))
+            self.assertTrue(control.apply_control(hardware, desired, True).allowed)
+            self.assertFalse(control.apply_control(hardware, desired, False).allowed)
+            self.assertTrue(control.apply_control(hardware, desired, True).allowed)
         self.assertEqual([call.args for call in turbo.call_args_list], [(True,), (False,), (True,)])
 
     def test_failed_turbo_disable_blocks_gaming_entry(self):
@@ -279,13 +335,76 @@ class TurboTests(unittest.TestCase):
                 self.assertEqual(control.reset_hardware(), 1)
         turbo.assert_called_once_with(False)
 
-    def test_waybar_shows_turbo_policy(self):
+    def test_status_reports_turbo_policy(self):
         reading = control.control_reading(control.normal_control(False, 3500), healthy=True, error=None, collisions=0)
         for allowed in (False, True):
             with self.subTest(allowed=allowed):
                 snapshot = control.StatusSnapshot(0, 70, True, control.GPUReading(), reading, allowed)
-                tooltip = json.loads(control.format_waybar(asdict(snapshot)))["tooltip"]
-                self.assertIn("CPU turbo: " + ("Allowed" if allowed else "Disabled"), tooltip)
+                self.assertIs(json.loads(json.dumps(asdict(snapshot)))["cpu_turbo_allowed"], allowed)
+
+
+class DaemonStatusTests(unittest.TestCase):
+    def test_unknown_ac_stays_unknown_and_keeps_balanced_with_gpu_clients(self):
+        telemetry = Mock()
+        telemetry.cpu_temperature.return_value = (50, None)
+        telemetry.gpu_reading.return_value = control.GPUReading(
+            power_state="D0", runtime_status="active", in_use=True, clients=["test-client"],
+        )
+        hardware = Mock(collisions=0)
+        publisher = Mock()
+        snapshots = []
+
+        def published(snapshot):
+            snapshots.append(snapshot)
+            control.STOP_REQUESTED = True
+
+        publisher.publish.side_effect = published
+        gpu_read = Mock(return_value=False)
+        with patch.multiple(control, Telemetry=Mock(return_value=telemetry),
+                            HardwareController=Mock(return_value=hardware),
+                            StatusPublisher=Mock(return_value=publisher),
+                            read_ac_online=Mock(return_value=None), gpu_powered_off=gpu_read,
+                            set_cpu_turbo=Mock(), suspend_offset=Mock(return_value=0), STOP_REQUESTED=False), \
+                patch.object(control.signal, "signal"):
+            self.assertEqual(control.run_daemon(), 0)
+        self.assertEqual(len(snapshots), 1)
+        snapshot = snapshots[0]
+        self.assertIsNone(snapshot.ac_online)
+        self.assertFalse(snapshot.cpu_turbo_allowed)
+        self.assertEqual(snapshot.cpu_turbo_reason, "ac_unknown")
+        self.assertEqual(snapshot.control.performance_mode, "Balanced")
+        self.assertEqual(snapshot.control.fan_reason, "firmware")
+        self.assertEqual(snapshot.control.control_temp_c, 50)
+        gpu_read.assert_not_called()
+
+
+class StatusPublisherTests(unittest.TestCase):
+    def test_newline_stream_includes_nulls_and_controller_faults(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "status.sock"
+            publisher = control.StatusPublisher(path)
+            try:
+                with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as client:
+                    client.settimeout(1)
+                    client.connect(str(path))
+                    with client.makefile("r") as stream:
+                        for healthy in (True, False):
+                            reading = control.control_reading(
+                                control.safe_control(), healthy=healthy,
+                                error=None if healthy else "test failure", collisions=0,
+                            )
+                            snapshot = control.StatusSnapshot(0, 50 if healthy else None, False,
+                                                              control.GPUReading(), reading, False if healthy else None)
+                            publisher.publish(snapshot)
+                            frame = json.loads(stream.readline())
+                            self.assertEqual(frame, asdict(snapshot))
+                            self.assertIsNone(frame["gpu"]["temperature_c"])
+                            if not healthy:
+                                self.assertEqual(frame["control"]["performance_mode"], "Unknown")
+                                self.assertEqual(frame["control"]["error"], "test failure")
+            finally:
+                publisher.close()
+            self.assertFalse(path.exists())
 
 
 class HardwareControllerTests(unittest.TestCase):
@@ -329,7 +448,8 @@ class HardwareControllerTests(unittest.TestCase):
         controller.hid = hid
         controller.applied = control.normal_control(False, 5000)
         controller.verify_at = float('inf')
-        controller.ensure(control.normal_control(False, 5000, True))
+        controller.ensure(control.normal_control(False, 5000, True,
+                                                 fan_reason="high_temperature_recovery", control_temp_c=79))
         hid.set_mode.assert_not_called()
         hid.set_rpm.assert_not_called()
 
