@@ -16,6 +16,14 @@ ShellRoot {
         id: notifications
     }
 
+    MediaService {
+        id: mediaService
+    }
+
+    MediaOsd {
+        service: mediaService
+    }
+
     BatteryAlerts {
         battery: UPower.displayDevice
         onBattery: UPower.onBattery

@@ -110,6 +110,20 @@ else:
                         self.assertFalse(state()["ui"]["buttons"][0]["badgeVisible"])
                         self.assertIn("No active NetworkManager VPN", state()["ui"]["buttons"][0]["text"])
 
+                        # Child popups inherit their panel's keyboard permissions.
+                        self.assertEqual(state()["ui"]["keyboardFocus"], 0)
+                        ipc("promptPassword")
+                        wait_for(lambda: state()["ui"]["keyboardFocus"] == 1)
+                        self.assertTrue(state()["ui"]["passwordPrompt"])
+                        ipc("clearPassword")
+                        wait_for(lambda: state()["ui"]["keyboardFocus"] == 0)
+                        ipc("promptPassword")
+                        wait_for(lambda: state()["ui"]["keyboardFocus"] == 1)
+                        ipc("closePopup")
+                        wait_for(lambda: state()["ui"]["keyboardFocus"] == 0)
+                        self.assertFalse(state()["ui"]["passwordPrompt"])
+                        ipc("openPopup")
+
                     device = {"type": 2, "name": "enp2s0", "nmManaged": True, "connected": False,
                               "hasLink": False, "linkSpeed": 0, "state": 4, "network": None}
                     ipc("setDevices", json.dumps({"devices": [device]}))

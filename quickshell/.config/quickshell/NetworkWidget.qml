@@ -4,6 +4,7 @@ import QtQuick.Controls.impl
 import QtQuick.Layouts
 import Quickshell
 import Quickshell.Networking
+import Quickshell.Wayland
 
 Item {
     id: root
@@ -84,6 +85,15 @@ Item {
         } else if (open) {
             scanTimer.restart();
         }
+    }
+
+    // Wayland popups inherit keyboard interactivity from their parent panel.
+    Binding {
+        target: root.panel.WlrLayershell
+        property: "keyboardFocus"
+        when: root.open && root.passwordNetwork !== null
+        value: WlrKeyboardFocus.Exclusive
+        restoreMode: Binding.RestoreBindingOrValue
     }
 
     Binding {

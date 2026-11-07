@@ -1,6 +1,7 @@
 import QtQuick
 import Quickshell
 import Quickshell.Io
+import Quickshell.Wayland
 
 ShellRoot {
     id: test
@@ -32,6 +33,9 @@ ShellRoot {
         target: "test"
         function setDevices(data: string): void { status.devices = JSON.parse(data).devices; }
         function openPopup(): void { network.open = true; }
+        function promptPassword(): void { network.promptPassword({ name: "Focus test" }); }
+        function clearPassword(): void { network.clearPassword(); }
+        function closePopup(): void { network.open = false; }
         function snapshot(): string {
             let labels = [];
             for (const item of panel.popup.data)
@@ -41,7 +45,9 @@ ShellRoot {
                 active: status.vpnActive, changing: status.vpnChanging, summary: status.vpnSummary,
                 wired: status.wired.map(device => status.wiredDescription(device)),
                 wiredConnected: status.wiredConnection !== null,
-                ui: { width: panel.popup.width, height: panel.popup.height, barWidth: network.width,
+                ui: { keyboardFocus: panel.WlrLayershell.keyboardFocus,
+                    passwordPrompt: network.passwordNetwork !== null,
+                    width: panel.popup.width, height: panel.popup.height, barWidth: network.width,
                     buttons: buttons.map(button => {
                         const badge = button.children.find(child => child.objectName === "vpnBadge");
                         return { icon: button.icon.source.toString(), active: button.active,
