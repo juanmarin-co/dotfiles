@@ -26,6 +26,7 @@ ShellRoot {
         NetworkWidget { id: network; panel: panel; networkStatus: status }
         Component.onCompleted: {
             popup = network.data.find(child => child.grabFocus !== undefined);
+            // IPC opening has no pointer serial for a Wayland popup grab.
             popup.grabFocus = false;
         }
     }
@@ -45,7 +46,7 @@ ShellRoot {
                 active: status.vpnActive, changing: status.vpnChanging, summary: status.vpnSummary,
                 wired: status.wired.map(device => status.wiredDescription(device)),
                 wiredConnected: status.wiredConnection !== null,
-                ui: { keyboardFocus: panel.WlrLayershell.keyboardFocus,
+                ui: { open: network.open, keyboardFocus: panel.WlrLayershell.keyboardFocus,
                     passwordPrompt: network.passwordNetwork !== null,
                     width: panel.popup.width, height: panel.popup.height, barWidth: network.width,
                     buttons: buttons.map(button => {

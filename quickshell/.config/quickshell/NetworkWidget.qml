@@ -60,13 +60,14 @@ Item {
             return;
         error = "";
         passwordNetwork.connectWithPsk(password.text);
-        password.clear();
-        passwordNetwork = null;
+        clearPassword();
     }
 
     function clearPassword() {
         password.clear();
         passwordNetwork = null;
+        if (open)
+            content.forceActiveFocus();
     }
 
     onOpenChanged: {
@@ -87,11 +88,12 @@ Item {
         }
     }
 
-    // Wayland popups inherit keyboard interactivity from their parent panel.
+    // Keep inherited keyboard focus until the popup closes: releasing it when
+    // cancelling/submitting a password also dismisses a grabbed Wayland popup.
     Binding {
         target: root.panel.WlrLayershell
         property: "keyboardFocus"
-        when: root.open && root.passwordNetwork !== null
+        when: root.open
         value: WlrKeyboardFocus.Exclusive
         restoreMode: Binding.RestoreBindingOrValue
     }

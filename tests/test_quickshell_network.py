@@ -110,13 +110,16 @@ else:
                         self.assertFalse(state()["ui"]["buttons"][0]["badgeVisible"])
                         self.assertIn("No active NetworkManager VPN", state()["ui"]["buttons"][0]["text"])
 
-                        # Child popups inherit their panel's keyboard permissions.
-                        self.assertEqual(state()["ui"]["keyboardFocus"], 0)
+                        # Keep focus for the popup's lifetime, not just its password page.
+                        self.assertEqual(state()["ui"]["keyboardFocus"], 1)
                         ipc("promptPassword")
                         wait_for(lambda: state()["ui"]["keyboardFocus"] == 1)
                         self.assertTrue(state()["ui"]["passwordPrompt"])
                         ipc("clearPassword")
-                        wait_for(lambda: state()["ui"]["keyboardFocus"] == 0)
+                        time.sleep(0.15)  # Allow any compositor-driven dismissal to arrive.
+                        self.assertTrue(state()["ui"]["open"])
+                        self.assertFalse(state()["ui"]["passwordPrompt"])
+                        self.assertEqual(state()["ui"]["keyboardFocus"], 1)
                         ipc("promptPassword")
                         wait_for(lambda: state()["ui"]["keyboardFocus"] == 1)
                         ipc("closePopup")
