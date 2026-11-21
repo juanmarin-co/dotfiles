@@ -10,40 +10,54 @@ Scope {
     PersistentProperties {
         id: state
         reloadableId: "battery-alerts"
+        property bool sentPlugIn: false
+        property bool sentUnplug: false
         property bool sentLow: false
         property bool sentCritical: false
     }
 
-    function sendAlert(level, critical) {
-        Quickshell.execDetached([
-            "notify-send", "--app-name=Battery", "--urgency=critical", "--expire-time=0",
-            "--icon", Qt.resolvedUrl("icons/lucide/battery-warning.svg").toString(),
-            critical ? "Battery critically low" : "Low battery",
-            level + "% remaining. " + (critical ? "Plug in now and save your work." : "Plug in soon.")
-        ]);
+    function sendAlert(summary, body, urgent) {
+        const command = ["notify-send", "--app-name=Battery", "--icon",
+            Qt.resolvedUrl("icons/lucide/battery-warning.svg").toString()];
+        if (urgent)
+            command.push("--urgency=critical", "--expire-time=0");
+        Quickshell.execDetached(command.concat([summary, body]));
     }
 
     function checkBattery() {
         if (!battery || !battery.ready || !battery.isPresent || !battery.isLaptopBattery)
             return;
         const level = Math.round(battery.percentage * 100);
+        if (level <= 80)
+            state.sentUnplug = false;
         if (!onBattery) {
-            // Re-arm only after meaningful recharge, not a brief plug/unplug.
+            // Re-arm after recharge so reconnecting at the same level stays quiet.
+            if (level >= 40)
+                state.sentPlugIn = false;
             if (level >= 20)
                 state.sentLow = false;
             if (level >= 10)
                 state.sentCritical = false;
+            if (level > 80 && !state.sentUnplug) {
+                state.sentUnplug = true;
+                sendAlert("Consider unplugging", level + "% charged.", false);
+            }
             return;
         }
         if (battery.state !== UPowerDeviceState.Discharging && battery.state !== UPowerDeviceState.Empty)
             return;
+        if (level <= 15)
+            state.sentPlugIn = true;
         if (level <= 5 && !state.sentCritical) {
             state.sentLow = true;
             state.sentCritical = true;
-            sendAlert(level, true);
+            sendAlert("Battery critically low", level + "% remaining. Plug in now and save your work.", true);
         } else if (level <= 15 && !state.sentLow) {
             state.sentLow = true;
-            sendAlert(level, false);
+            sendAlert("Low battery", level + "% remaining. Plug in soon.", true);
+        } else if (level < 40 && !state.sentPlugIn) {
+            state.sentPlugIn = true;
+            sendAlert("Plug in soon", level + "% remaining.", false);
         }
     }
 

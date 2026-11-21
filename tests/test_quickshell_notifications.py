@@ -83,7 +83,7 @@ def protocol_suite():
             raise AssertionError("Timed out waiting for notification state")
 
         def setUp(self):
-            self.sample_battery(100, discharging=False)
+            self.sample_battery(80, discharging=False)
             self.ipc("notifications", "dismissAll")
             self.ipc("test", "setDnd", "false")
             self.wait_for(lambda: not self.snapshot()["notifications"])
@@ -113,7 +113,7 @@ def protocol_suite():
             self.sample_battery(0, ready=False)
             time.sleep(0.1)
             self.assertEqual(self.snapshot()["notifications"], [])
-            self.sample_battery(16)
+            self.sample_battery(40)
             self.assertEqual(self.snapshot()["notifications"], [])
             self.sample_battery(15)
             self.wait_count(1)
@@ -149,6 +149,45 @@ def protocol_suite():
                 self.sample_battery(level, discharging=False)
             time.sleep(0.1)
             self.assertEqual(self.snapshot()["notifications"], [])
+
+        def test_battery_plug_in_reminder_rearms_at_40_percent(self):
+            self.ipc("test", "setDnd", "true")
+            self.sample_battery(40)
+            self.sample_battery(39, discharging=False)
+            time.sleep(0.1)
+            self.assertEqual(self.snapshot()["notifications"], [])
+            self.sample_battery(39)
+            self.wait_count(1)
+            reminder = self.snapshot()["notifications"][0]
+            self.assertEqual(reminder["summary"], "Plug in soon")
+            self.assertIn("39%", reminder["body"])
+            self.assertEqual(reminder["urgency"], 1)
+            self.assertEqual(self.snapshot()["visible"], [])
+            self.sample_battery(39, discharging=False)
+            self.sample_battery(38)
+            time.sleep(0.1)
+            self.assertEqual(len(self.snapshot()["notifications"]), 1)
+            self.sample_battery(40, discharging=False)
+            self.sample_battery(39)
+            self.wait_count(2)
+
+        def test_battery_unplug_reminder_rearms_at_80_percent(self):
+            self.sample_battery(81)
+            time.sleep(0.1)
+            self.assertEqual(self.snapshot()["notifications"], [])
+            self.sample_battery(81, discharging=False)
+            self.wait_count(1)
+            reminder = self.snapshot()["notifications"][0]
+            self.assertEqual(reminder["summary"], "Consider unplugging")
+            self.assertIn("81%", reminder["body"])
+            self.assertEqual(reminder["urgency"], 1)
+            self.sample_battery(81)
+            self.sample_battery(82, discharging=False)
+            time.sleep(0.1)
+            self.assertEqual(len(self.snapshot()["notifications"]), 1)
+            self.sample_battery(80)
+            self.sample_battery(81, discharging=False)
+            self.wait_count(2)
 
         def test_battery_rearms_after_recharge_not_brief_replug(self):
             self.sample_battery(15)
