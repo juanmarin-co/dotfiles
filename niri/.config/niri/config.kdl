@@ -123,9 +123,10 @@ binds {
     XF86MonBrightnessDown allow-when-locked=true { spawn "qs" "ipc" "call" "media" "brightnessDown"; }
 
     // Screenshots and session controls.
-    Print { spawn-sh "grim -g \"$(slurp)\" - | satty --filename -"; }
-    Ctrl+Print { spawn-sh "grim - | satty --filename -"; }
+    Print { screenshot; }
+    Ctrl+Print { screenshot-screen; }
     Alt+Print { screenshot-window; }
+    Mod+Shift+Print { spawn-sh "wl-paste --type image/png | satty -f -"; }
     Mod+Shift+P { power-off-monitors; }
     Mod+Shift+Slash { show-hotkey-overlay; }
     Mod+Shift+E { quit; }
