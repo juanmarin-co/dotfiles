@@ -21,6 +21,7 @@ let hasAudio = false;
 let connected = false;
 let typed = false;
 let stopping = false;
+let submitOnStop = false;
 let inputCleared = false;
 let done = false;
 
@@ -56,16 +57,31 @@ function append(pcm) {
 }
 
 function maybeFinish() {
-  if (inputCleared && turns.size === 0 && !keyboard) {
-    finish();
+  if (!inputCleared || turns.size > 0 || keyboard || done) {
+    return;
   }
+  if (!submitOnStop || !typed) {
+    finish();
+    return;
+  }
+  keyboard = spawn("wtype", ["-k", "Return"], { stdio: "ignore" });
+  keyboard.on("error", () => finish("Could not submit dictation"));
+  keyboard.on("close", (code) => {
+    keyboard = undefined;
+    if (code === 0) {
+      finish();
+    } else {
+      finish("Could not submit dictation");
+    }
+  });
 }
 
-function stop() {
+function stop(submit) {
   if (done || stopping) {
     return;
   }
   stopping = true;
+  submitOnStop = submit;
   clearTimeout(microphoneDeadline);
   recorder?.kill();
   if (!hasAudio) {
@@ -199,8 +215,10 @@ function handleEvent(event) {
 }
 
 input.on("line", (line) => {
-  if (line === "stop") {
-    stop();
+  if (line === "cancel") {
+    finish();
+  } else if (line === "stop" || line === "submit") {
+    stop(line === "submit");
   }
 });
 input.on("close", () => finish());

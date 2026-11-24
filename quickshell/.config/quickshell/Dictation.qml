@@ -7,30 +7,39 @@ Scope {
     id: root
 
     property string status: ""
-    property bool stopping: false
+    property string stopCommand: ""
     property bool failed: false
     property var samples: []
+
+    function toggle(command) {
+        if (worker.running) {
+            if (!root.stopCommand) {
+                root.stopCommand = command;
+                root.status = "Finishing…";
+                worker.write(command);
+            }
+            return;
+        }
+        hideError.stop();
+        root.failed = false;
+        root.stopCommand = "";
+        root.samples = [];
+        root.status = "Starting…";
+        worker.running = true;
+    }
 
     IpcHandler {
         target: "dictation"
 
         function status(): string { return root.status; }
-
-        function toggle(): void {
+        function toggle(): void { root.toggle("stop\n"); }
+        function toggleAndSubmit(): void { root.toggle("submit\n"); }
+        function cancel(): void {
             if (worker.running) {
-                if (!root.stopping) {
-                    root.stopping = true;
-                    root.status = "Finishing…";
-                    worker.write("stop\n");
-                }
-                return;
+                root.stopCommand = "cancel\n";
+                root.status = "";
+                worker.write(root.stopCommand);
             }
-            hideError.stop();
-            root.failed = false;
-            root.stopping = false;
-            root.samples = [];
-            root.status = "Starting…";
-            worker.running = true;
         }
     }
 
@@ -40,14 +49,18 @@ Scope {
         stdinEnabled: true
 
         onStarted: {
-            if (root.stopping)
-                write("stop\n");
+            if (root.stopCommand) {
+                write(root.stopCommand);
+            }
         }
 
         stdout: SplitParser {
             onRead: line => {
+                if (root.stopCommand === "cancel\n") {
+                    return;
+                }
                 const event = JSON.parse(line);
-                if (event.type === "waveform" && !root.stopping) {
+                if (event.type === "waveform" && !root.stopCommand) {
                     root.status = "Recording";
                     root.samples = [...root.samples.slice(-47), event.range];
                 } else if (event.type === "error") {
@@ -59,6 +72,9 @@ Scope {
         }
 
         onExited: (code, exitStatus) => {
+            if (root.stopCommand === "cancel\n") {
+                return;
+            }
             if (code !== 0 || exitStatus !== 0) {
                 if (!root.failed) {
                     root.status = "Dictation stopped unexpectedly";
@@ -79,8 +95,8 @@ Scope {
 
     PanelWindow {
         screen: Quickshell.screens[0]
-        anchors.bottom: true
-        margins.bottom: 80
+        anchors.top: true
+        margins.top: BarStyle.height + Spacing.outer
         implicitWidth: 300
         implicitHeight: 48
         exclusiveZone: 0
