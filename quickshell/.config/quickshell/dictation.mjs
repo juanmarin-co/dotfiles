@@ -1,28 +1,27 @@
 import { execFile, spawn } from "node:child_process";
 import { createInterface } from "node:readline";
 import { promisify } from "node:util";
+import { herdrKeywords } from "./dictation-context.mjs";
 
 const run = promisify(execFile);
 const rate = 24000;
 const frameBytes = rate * 2 * 0.04;
-const pauseMs = 500;
+const finalCommitId = "dictation_stop";
 const turns = new Map();
 const queuedAudio = [];
 const input = createInterface({ input: process.stdin });
-const keyLookup = new AbortController();
+const sessionAbort = new AbortController();
 let socket;
 let recorder;
 let keyboard;
 let deadline;
 let microphoneDeadline;
-let settleTimer;
-let speechItem;
 let audio = Buffer.alloc(0);
 let hasAudio = false;
 let connected = false;
 let typed = false;
 let stopping = false;
-let settled = false;
+let inputCleared = false;
 let done = false;
 
 function report(event) {
@@ -36,8 +35,7 @@ function finish(message) {
   done = true;
   clearTimeout(deadline);
   clearTimeout(microphoneDeadline);
-  clearTimeout(settleTimer);
-  keyLookup.abort();
+  sessionAbort.abort();
   recorder?.kill();
   keyboard?.kill();
   socket?.close();
@@ -58,7 +56,7 @@ function append(pcm) {
 }
 
 function maybeFinish() {
-  if (settled && !speechItem && turns.size === 0 && !keyboard) {
+  if (inputCleared && turns.size === 0 && !keyboard) {
     finish();
   }
 }
@@ -85,12 +83,9 @@ function flushFinalAudio() {
   if (audio.length >= 2) {
     append(audio.subarray(0, audio.length - (audio.length % 2)));
   }
-  // Give server VAD a trailing pause so it commits any unfinished speech.
-  append(Buffer.alloc((rate * 2 * (pauseMs + 200)) / 1000));
-  settleTimer = setTimeout(() => {
-    settled = true;
-    maybeFinish();
-  }, 1200);
+  send("input_audio_buffer.commit", { event_id: finalCommitId });
+  // The clear acknowledgment follows any commits for audio sent before stop.
+  send("input_audio_buffer.clear");
 }
 
 function captureAudio(chunk) {
@@ -176,14 +171,12 @@ function handleEvent(event) {
         flushFinalAudio();
       }
       break;
-    case "input_audio_buffer.speech_started":
-      speechItem = event.item_id;
-      break;
     case "input_audio_buffer.committed":
-      if (event.item_id === speechItem) {
-        speechItem = undefined;
-      }
       turns.set(event.item_id, null);
+      break;
+    case "input_audio_buffer.cleared":
+      inputCleared = true;
+      maybeFinish();
       break;
     case "conversation.item.input_audio_transcription.completed":
       if (turns.has(event.item_id)) {
@@ -195,7 +188,12 @@ function handleEvent(event) {
       finish("OpenAI could not transcribe the audio");
       break;
     case "error":
-      finish("OpenAI rejected the dictation request");
+      if (
+        event.error?.event_id !== finalCommitId ||
+        event.error?.code !== "input_audio_buffer_commit_empty"
+      ) {
+        finish("OpenAI rejected the dictation request");
+      }
       break;
   }
 }
@@ -226,34 +224,45 @@ recorder.on("close", () => {
   }
 });
 
-const { stdout } = await run(
-  "secret-tool",
-  ["lookup", "service", "openai", "purpose", "dictation"],
-  { signal: keyLookup.signal },
-).catch(() => ({ stdout: "" }));
-const key = stdout.trim();
-if (!done && !key) {
+const key = run("secret-tool", ["lookup", "service", "openai", "purpose", "dictation"], {
+  signal: sessionAbort.signal,
+})
+  .then(({ stdout }) => stdout.trim())
+  .catch(() => "");
+const keywords = herdrKeywords(key, sessionAbort.signal).catch((error) => {
+  finish(error.message);
+});
+const apiKey = await key;
+if (!done && !apiKey) {
   finish("OpenAI key unavailable in the keyring");
 }
 
 if (!done) {
   socket = new WebSocket("wss://api.openai.com/v1/realtime?intent=transcription", {
-    headers: { Authorization: "Bearer " + key },
+    headers: { Authorization: "Bearer " + apiKey },
   });
-  socket.addEventListener("open", () =>
+  socket.addEventListener("open", async () => {
+    const hints = await keywords;
+    if (done) {
+      return;
+    }
+    const transcription = { model: "gpt-transcribe", languages: ["en", "es"] };
+    if (hints.length > 0) {
+      transcription.keywords = hints;
+    }
     send("session.update", {
       session: {
         type: "transcription",
         audio: {
           input: {
             format: { type: "audio/pcm", rate },
-            transcription: { model: "gpt-transcribe", languages: ["en", "es"] },
-            turn_detection: { type: "server_vad", silence_duration_ms: pauseMs },
+            transcription,
+            turn_detection: { type: "semantic_vad" },
           },
         },
       },
-    }),
-  );
+    });
+  });
   socket.addEventListener("message", ({ data }) => handleEvent(JSON.parse(data)));
   socket.addEventListener("error", () => finish("Could not connect to OpenAI"));
   socket.addEventListener("close", () => finish("OpenAI connection closed"));
