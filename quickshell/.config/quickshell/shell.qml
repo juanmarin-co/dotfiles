@@ -24,6 +24,8 @@ ShellRoot {
         service: mediaService
     }
 
+    Dictation {}
+
     BatteryAlerts {
         battery: UPower.displayDevice
         onBattery: UPower.onBattery

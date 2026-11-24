@@ -1,0 +1,13 @@
+{
+  "languages": {
+    "JavaScript": {
+      "language_servers": ["oxlint", "oxfmt", "..."],
+      "formatter": {
+        "language_server": {
+          "name": "oxfmt"
+        }
+      },
+      "format_on_save": "on"
+    }
+  }
+}

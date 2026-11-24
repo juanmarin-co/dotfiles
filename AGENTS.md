@@ -8,7 +8,11 @@ To add a tool, mirror its path under a package folder and link it. Always ask th
 
 Theme desktop components with [Ayu](https://ayutheme.com/) (Dark variant). Use Inter for UI elements and JetBrains Mono for terminal emulators.
 
-Quickshell provides the bar, launcher, and notifications. Prefer Quickshell’s built-in APIs over external scripts, and reuse existing UI components and styling instead of duplicating them.
+Quickshell provides the bar, launcher, notifications, and dictation overlay. Prefer Quickshell’s built-in APIs over external scripts, and reuse existing UI components and styling instead of duplicating them.
+
+Keep dictation on the `Super+D` toggle until stable Niri supports press and release bindings. Dictation uses `gpt-transcribe` with English and Spanish hints. Keep its API key in GNOME Keyring.
+
+Use Corepack and the repo-pinned pnpm for JavaScript tooling. Run `pnpm lint` and `pnpm format:check` from the repo root. Require braces around control-flow bodies and avoid ternary expressions.
 
 ## Tools of Interest
 

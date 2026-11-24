@@ -83,6 +83,7 @@ binds {
     Mod+2 { spawn-sh "~/.config/niri/scripts/focus-or-launch herdr-app"; }
     Mod+3 { spawn-sh "~/.config/niri/scripts/focus-or-launch com.mitchellh.ghostty ghostty"; }
     Mod+Space { spawn "qs" "ipc" "call" "launcher" "toggle"; }
+    Super+D repeat=false { spawn "qs" "ipc" "call" "dictation" "toggle"; }
     Super+Alt+L { spawn "swaylock" "-f" "-c" "000000"; }
 
     // H/L navigates columns. J/K traverses a stack, then the adjacent workspace.

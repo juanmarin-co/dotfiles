@@ -1,0 +1,6 @@
+{
+  "rules": {
+    "curly": ["error", "all"],
+    "no-ternary": "error"
+  }
+}
