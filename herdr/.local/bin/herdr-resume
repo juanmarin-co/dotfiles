@@ -14,15 +14,6 @@ const DELIBERATE_EXIT_REASONS = new Set([
   "exit",
 ]);
 
-// Flags that must not be replayed on unattended reboot resume (reported in notice).
-const BYPASS_FLAGS = new Set([
-  "--dangerously-skip-permissions",
-  "--dangerously-bypass-approvals-and-sandbox",
-  "--yolo",
-  "--full-auto",
-  "--approve",
-]);
-
 // Per-agent runtime flag whitelist. Anything outside this list is ignored.
 const FLAG_WHITELIST = {
   pi: {
@@ -150,10 +141,9 @@ function isOneShot(agent, argv) {
 
 function filterFlags(agent, argv) {
   const kept = [];
-  const stripped = [];
   const whitelist = FLAG_WHITELIST[agent];
   if (!whitelist) {
-    return { kept, stripped };
+    return kept;
   }
 
   const args = argv.slice(1);
@@ -171,12 +161,6 @@ function filterFlags(agent, argv) {
     if (eqIdx !== -1) {
       flagName = arg.slice(0, eqIdx);
       hasInlineVal = true;
-    }
-
-    if (BYPASS_FLAGS.has(flagName)) {
-      stripped.push(flagName);
-      i += 1;
-      continue;
     }
 
     if (whitelist.value.has(flagName)) {
@@ -199,7 +183,7 @@ function filterFlags(agent, argv) {
     i += 1;
   }
 
-  return { kept, stripped };
+  return kept;
 }
 
 function parseCliArgs(argv) {
@@ -271,13 +255,11 @@ function handleHook(agentHint) {
     return;
   }
 
-  const { kept, stripped } = filterFlags(agent, argv);
   const record = {
     agent,
     session,
     cwd,
-    flags: kept,
-    stripped,
+    flags: filterFlags(agent, argv),
   };
   setLabel(terminalId, JSON.stringify(record));
 }
@@ -333,10 +315,7 @@ function handleCheck() {
   }
 
   const cmdLine = cmdParts.map(shellQuote).join(" ");
-  let notice = `↻ herdr-resume: resuming ${rec.agent} (${rec.session.slice(0, 8)})`;
-  if (Array.isArray(rec.stripped) && rec.stripped.length > 0) {
-    notice += ` [stripped: ${rec.stripped.join(", ")}]`;
-  }
+  const notice = `↻ herdr-resume: resuming ${rec.agent} (${rec.session.slice(0, 8)})`;
 
   const lines = [
     `cd ${shellQuote(rec.cwd)} || return`,
