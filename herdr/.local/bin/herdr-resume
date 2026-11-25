@@ -14,82 +14,42 @@ const DELIBERATE_EXIT_REASONS = new Set([
   "exit",
 ]);
 
-// Flags that must not be replayed on unattended reboot resume.
+// Flags that must not be replayed on unattended reboot resume (reported in notice).
 const BYPASS_FLAGS = new Set([
   "--dangerously-skip-permissions",
   "--dangerously-bypass-approvals-and-sandbox",
   "--yolo",
   "--full-auto",
-  "-a",
   "--approve",
 ]);
 
-// Session-picker, one-shot, and prompt flags we never carry into a resume.
-const DROP_FLAGS_WITH_VALUE = new Set([
-  "--session",
-  "--session-id",
-  "--fork",
-  "--conversation",
-  "--resume",
-  "-r",
-  "--prompt",
-  "--prompt-interactive",
-  "-i",
-  "--output-format",
-  "--input-format",
-  "--json-schema",
-  "--print-timeout",
-  "--export",
-]);
-
-const DROP_BOOLEAN_FLAGS = new Set([
-  "--continue",
-  "-c",
-  "--last",
-  "--all",
-  "--print",
-  "-p",
-  "--no-session",
-  "--resume",
-  "-r",
-]);
-
-// Safe value flags to preserve per agent.
-const KEEP_VALUE_FLAGS = new Set([
-  "--model",
-  "-m",
-  "--provider",
-  "--models",
-  "--thinking",
-  "--session-dir",
-  "--tui-mode",
-  "--name",
-  "-n",
-  "--config",
-  "-c",
-  "--enable",
-  "--disable",
-  "--remote",
-  "--agent",
-  "--effort",
-  "--mode",
-  "--add-dir",
-  "--project",
-  "--settings",
-]);
-
-const KEEP_BOOLEAN_FLAGS = new Set([
-  "--no-context-files",
-  "-nc",
-  "--no-approve",
-  "-na",
-  "--offline",
-  "--verbose",
-  "--sandbox",
-  "--remote-agent",
-  "--remote-control",
-  "--new-project",
-]);
+// Per-agent runtime flag whitelist. Anything outside this list is ignored.
+const FLAG_WHITELIST = {
+  pi: {
+    value: new Set(["--session-dir", "--tui-mode"]),
+    bool: new Set(["--no-context-files", "-nc", "--no-approve", "-na", "--offline"]),
+  },
+  codex: {
+    value: new Set([
+      "-c",
+      "--config",
+      "--enable",
+      "--disable",
+      "-p",
+      "--profile",
+      "-s",
+      "--sandbox",
+      "--add-dir",
+      "--remote",
+      "--remote-auth-token-env",
+    ]),
+    bool: new Set(["--search", "--no-alt-screen", "--no-daemon"]),
+  },
+  agy: {
+    value: new Set(["--mode", "--effort", "--agent", "--add-dir", "--project", "--settings"]),
+    bool: new Set(["--sandbox", "--remote-agent", "--remote-control"]),
+  },
+};
 
 function readStdin() {
   try {
@@ -191,17 +151,13 @@ function isOneShot(agent, argv) {
 function filterFlags(agent, argv) {
   const kept = [];
   const stripped = [];
+  const whitelist = FLAG_WHITELIST[agent];
+  if (!whitelist) {
+    return { kept, stripped };
+  }
+
   const args = argv.slice(1);
   let i = 0;
-
-  // Skip codex subcommands like `resume` or `fork` at position 0.
-  if (agent === "codex" && args.length > 0 && (args[0] === "resume" || args[0] === "fork")) {
-    i = 1;
-    // Also skip optional positional session ID right after `codex resume`.
-    if (i < args.length && !args[i].startsWith("-")) {
-      i += 1;
-    }
-  }
 
   while (i < args.length) {
     const arg = args[i];
@@ -217,33 +173,13 @@ function filterFlags(agent, argv) {
       hasInlineVal = true;
     }
 
-    // Handle agent-specific -c conflict: codex uses -c key=val, pi/agy use -c for --continue.
-    if (flagName === "-c" && agent !== "codex") {
-      i += 1;
-      continue;
-    }
-
     if (BYPASS_FLAGS.has(flagName)) {
       stripped.push(flagName);
       i += 1;
       continue;
     }
 
-    if (DROP_FLAGS_WITH_VALUE.has(flagName)) {
-      if (hasInlineVal) {
-        i += 1;
-      } else {
-        i += 2;
-      }
-      continue;
-    }
-
-    if (DROP_BOOLEAN_FLAGS.has(flagName)) {
-      i += 1;
-      continue;
-    }
-
-    if (KEEP_VALUE_FLAGS.has(flagName)) {
+    if (whitelist.value.has(flagName)) {
       if (hasInlineVal) {
         kept.push(arg);
         i += 1;
@@ -256,10 +192,8 @@ function filterFlags(agent, argv) {
       continue;
     }
 
-    if (KEEP_BOOLEAN_FLAGS.has(flagName)) {
+    if (!hasInlineVal && whitelist.bool.has(flagName)) {
       kept.push(flagName);
-      i += 1;
-      continue;
     }
 
     i += 1;
