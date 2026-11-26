@@ -24,7 +24,10 @@ Scope {
                 || !["temperature_c", "utilization_percent", "memory_used_mb", "memory_total_mb"]
                     .every(key => nullableNumber(gpu[key]))
                 || typeof gpu.power_state !== "string" || typeof gpu.runtime_status !== "string"
-                || typeof gpu.in_use !== "boolean" || !Array.isArray(gpu.clients)
+                || typeof gpu.in_use !== "boolean" || typeof gpu.card_present !== "boolean"
+                || (gpu.mode !== "hybrid" && gpu.mode !== "integrated")
+                || typeof gpu.mode_applied !== "boolean"
+                || !Array.isArray(gpu.clients)
                 || !gpu.clients.every(client => typeof client === "string")
                 || !(gpu.error === null || typeof gpu.error === "string")
                 || typeof control.healthy !== "boolean" || typeof control.high_temperature_cooling !== "boolean"

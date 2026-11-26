@@ -1,0 +1,57 @@
+import QtQuick
+import Quickshell
+import Quickshell.Io
+
+ShellRoot {
+    id: test
+
+    function texts(item) {
+        if (item.visible === false)
+            return [];
+        let result = typeof item.text === "string" && item.text ? [item.text] : [];
+        for (const child of item.children || [])
+            result = result.concat(texts(child));
+        return result;
+    }
+
+    Rz09Service {
+        id: monitor
+        socketPath: Quickshell.env("RZ09_TEST_SOCKET")
+    }
+
+    PanelWindow {
+        id: panel
+        property var popup: null
+        anchors.top: true
+        anchors.left: true
+        anchors.right: true
+        implicitHeight: 1
+        exclusiveZone: 0
+        color: "transparent"
+        GpuModeWidget { id: gpu; panel: panel; service: monitor }
+        Component.onCompleted: {
+            popup = gpu.data.find(child => child.grabFocus !== undefined);
+            popup.grabFocus = false;
+        }
+    }
+
+    IpcHandler {
+        target: "test"
+        function openPopup(): void { gpu.open = true; }
+        function closePopup(): void { gpu.open = false; }
+        // Never applies the selection: the confirm step is as far as tests may drive.
+        function selectIntegrated(): void { gpu.requestMode("integrated"); }
+        function snapshot(): string {
+            const popup = panel.popup;
+            const button = gpu.data.find(child => child.tooltipText !== undefined);
+            let labels = [];
+            for (const item of popup.data)
+                labels = labels.concat(test.texts(item));
+            return JSON.stringify({ connected: monitor.connected, available: monitor.available,
+                sample: monitor.snapshot, ui: { width: popup.width, height: popup.height, open: gpu.open,
+                    barWidth: gpu.width, label: button.text, color: String(button.icon.color),
+                    status: gpu.status, pending: gpu.pendingMode ? gpu.pendingMode.key : null,
+                    texts: labels } });
+        }
+    }
+}

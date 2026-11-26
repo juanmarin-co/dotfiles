@@ -22,7 +22,8 @@ Item {
         ? "Custom curve · Target " + control.fan_target_rpm + " RPM" : fanControl
     readonly property string fanReason: fanExplanation()
     readonly property string turboReason: turboExplanation()
-    readonly property string gpuState: gpu ? gpu.power_state + " · " + gpu.runtime_status : "Unknown"
+    readonly property string gpuState: !gpu ? "Unknown" : !gpu.card_present ? "Removed"
+        : gpu.power_state + " · " + gpu.runtime_status
     readonly property string status: !available
         ? service.connected ? "Waiting for live data" : "Controller unavailable"
         : !control?.healthy ? "Controller fault"
@@ -50,11 +51,10 @@ Item {
 
     function turboExplanation() {
         switch (sample?.cpu_turbo_reason) {
-        case "ac_and_gpu_off": return "AC power confirmed; NVIDIA GPU is powered off.";
+        case "dgpu_absent": return "Allowed with the NVIDIA GPU removed on AC power.";
         case "on_battery": return "Disabled on battery power.";
         case "ac_unknown": return "AC power could not be confirmed.";
-        case "gaming_mode": return "Disabled while Gaming hardware mode is active.";
-        case "gpu_not_confirmed_off": return "NVIDIA GPU is not confirmed powered off.";
+        case "dgpu_active": return "Disabled while the NVIDIA GPU is present.";
         case "control_error": return "Turbo state could not be confirmed.";
         default: return "";
         }
@@ -125,7 +125,8 @@ Item {
                 Repeater {
                     model: [
                         { label: "CPU", value: root.temperature(root.sample?.cpu_temp_c), detail: "Package temperature" },
-                        { label: "NVIDIA GPU", value: root.gpuSleeping ? "Sleeping"
+                        { label: "NVIDIA GPU", value: !root.gpu?.card_present ? "Removed"
+                            : root.gpuSleeping ? "Sleeping"
                             : root.gpu?.temperature_c != null ? root.temperature(root.gpu.temperature_c)
                                 : "Not sampled", detail: root.gpuState }
                     ]
@@ -265,9 +266,9 @@ Item {
                     font.pixelSize: 12
                 }
                 BluetoothText {
-                    visible: !root.gpuSleeping && root.gpu?.temperature_c === null && !root.gpu?.error
+                    visible: !!root.gpu?.card_present && !root.gpuSleeping && root.gpu?.temperature_c === null && !root.gpu?.error
                     Layout.fillWidth: true
-                    text: "GPU metrics are sampled only while active with a detected client."
+                    text: "GPU metrics are sampled while the GPU is active."
                     wrapMode: Text.WordWrap
                     color: "#8a9199"
                     font.pixelSize: 12

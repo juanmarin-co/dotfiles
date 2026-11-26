@@ -17,7 +17,8 @@ ROOT = Path(__file__).resolve().parents[1]
 def sample():
     return {
         "timestamp": time.time(), "cpu_temp_c": 50.0, "ac_online": False,
-        "gpu": {"power_state": "D3cold", "runtime_status": "suspended", "in_use": False,
+        "gpu": {"card_present": True, "power_state": "D3cold", "runtime_status": "suspended", "in_use": False,
+                "mode": "hybrid", "mode_applied": True,
                 "temperature_c": None, "utilization_percent": None, "memory_used_mb": None,
                 "memory_total_mb": None, "clients": [], "error": None},
         "control": {"performance_mode": "Balanced", "fan_control": "Automatic", "fan_target_rpm": None,

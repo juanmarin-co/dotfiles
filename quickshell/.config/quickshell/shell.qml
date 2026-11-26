@@ -51,11 +51,11 @@ ShellRoot {
             id: bar
             required property var modelData
             screen: modelData
-            holdOpen: [workspaces, calendar, network, bluetooth, cooling, energy, session, tray]
+            holdOpen: [workspaces, calendar, network, bluetooth, cooling, gpu, energy, session, tray]
                 .some(widget => widget.open)
 
             function closePopovers(except) {
-                for (const widget of [workspaces, calendar, network, bluetooth, cooling, energy, session, tray]) {
+                for (const widget of [workspaces, calendar, network, bluetooth, cooling, gpu, energy, session, tray]) {
                     if (widget !== except)
                         widget.open = false;
                 }
@@ -135,11 +135,23 @@ ShellRoot {
                     id: cooling
                     panel: bar
                     service: coolingService
-                    anchors.right: energy.left
+                    anchors.right: gpu.left
                     anchors.verticalCenter: parent.verticalCenter
                     onOpenChanged: {
                         if (open)
                             bar.closePopovers(cooling);
+                    }
+                }
+
+                GpuModeWidget {
+                    id: gpu
+                    panel: bar
+                    service: coolingService
+                    anchors.right: energy.left
+                    anchors.verticalCenter: parent.verticalCenter
+                    onOpenChanged: {
+                        if (open)
+                            bar.closePopovers(gpu);
                     }
                 }
 
