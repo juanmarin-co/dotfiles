@@ -3,6 +3,7 @@
 import importlib.machinery
 import importlib.util
 import json
+import shutil
 import socket
 import sys
 import tempfile
@@ -21,12 +22,12 @@ loader.exec_module(control)
 
 
 class PolicyTests(unittest.TestCase):
-    def test_gaming_requires_both_ac_and_gpu_client(self):
+    def test_gaming_requires_both_ac_and_card_presence(self):
         for ac in (False, True):
-            for client in (False, True):
-                with self.subTest(ac=ac, client=client):
-                    desired = control.FanPolicy().evaluate(50, None, client, ac, 0)
-                    self.assertEqual(desired.mode, control.MODE_GAMING if ac and client else control.MODE_BALANCED)
+            for card in (False, True):
+                with self.subTest(ac=ac, card=card):
+                    desired = control.FanPolicy().evaluate(50, None, card, ac, 0)
+                    self.assertEqual(desired.mode, control.MODE_GAMING if ac and card else control.MODE_BALANCED)
                     self.assertFalse(desired.manual)
 
     def test_either_sensor_triggers_cooling_without_forcing_a_mode(self):
@@ -41,8 +42,8 @@ class PolicyTests(unittest.TestCase):
     def test_power_and_client_changes_still_select_mode_while_cooling(self):
         policy = control.FanPolicy()
         policy.evaluate(85, 75, True, True, 0)
-        for client, ac, mode in ((True, False, 0), (True, True, 1), (False, True, 0)):
-            desired = policy.evaluate(84, 75, client, ac, 1)
+        for card, ac, mode in ((True, False, 0), (True, True, 1), (False, True, 0)):
+            desired = policy.evaluate(84, 75, card, ac, 1)
             self.assertEqual(desired.mode, mode)
             self.assertEqual(desired.target_rpm, 5000)
             self.assertTrue(desired.high_temperature_cooling)
@@ -253,79 +254,54 @@ class TurboTests(unittest.TestCase):
             with self.assertRaisesRegex(control.ControlError, "readback"):
                 control.set_cpu_turbo(False)
 
-    def test_gpu_off_requires_d3cold_and_runtime_suspension(self):
-        with tempfile.TemporaryDirectory() as directory:
-            path = Path(directory)
-            (path / "power").mkdir()
-            with patch.object(control, "GPU_SYSFS_DIRECTORY", path):
-                self.assertFalse(control.gpu_powered_off())
-                for power in ("D0", "D3hot", "D3cold", "unknown"):
-                    for runtime in ("active", "suspended", "suspending", "resuming", "unknown"):
-                        with self.subTest(power=power, runtime=runtime):
-                            (path / "power_state").write_text(power + "\n")
-                            (path / "power/runtime_status").write_text(runtime + "\n")
-                            self.assertEqual(control.gpu_powered_off(), power == "D3cold" and runtime == "suspended")
-                (path / "power_state").write_text("D3cold\n")
-                (path / "power/runtime_status").unlink()
-                self.assertFalse(control.gpu_powered_off())
-
-    def test_turbo_policy_and_hardware_order_in_both_modes(self):
+    def test_turbo_policy_and_hardware_order_in_all_mode_combinations(self):
         for ac_online in (True, False, None):
-            for gpu_off in (True, False):
-                for gaming in (True, False):
-                    with self.subTest(ac_online=ac_online, gpu_off=gpu_off, gaming=gaming):
-                        calls = []
-                        hardware = Mock()
-                        hardware.ensure.side_effect = lambda desired: calls.append("hardware")
-                        with patch.object(control, "gpu_powered_off", return_value=gpu_off) as gpu_read, patch.object(control, "set_cpu_turbo", side_effect=lambda allowed: calls.append(allowed)):
-                            turbo = control.apply_control(hardware, control.normal_control(gaming, 5000), ac_online)
-                        expected = ac_online is True and gpu_off and not gaming
-                        reason = ("ac_unknown" if ac_online is None else "on_battery" if not ac_online
-                                  else "gaming_mode" if gaming else "ac_and_gpu_off" if gpu_off else "gpu_not_confirmed_off")
-                        self.assertIs(turbo.allowed, expected)
-                        self.assertEqual(turbo.reason, reason)
-                        self.assertEqual(calls, ["hardware", True] if expected else [False, "hardware"])
-                        self.assertEqual(gpu_read.call_count, 2 if expected else 1 if ac_online is True and not gaming else 0)
+            for card_present in (True, False):
+                with self.subTest(ac_online=ac_online, card_present=card_present):
+                    calls = []
+                    hardware = Mock()
+                    hardware.ensure.side_effect = lambda desired: calls.append("hardware")
+                    with patch.object(control, "set_cpu_turbo", side_effect=lambda allowed: calls.append(allowed)):
+                        turbo = control.apply_control(hardware, control.normal_control(card_present, 5000), card_present, ac_online)
+                    expected = ac_online is True and not card_present
+                    reason = ("ac_unknown" if ac_online is None else "on_battery" if not ac_online
+                              else "dgpu_absent" if expected else "dgpu_active")
+                    self.assertIs(turbo.allowed, expected)
+                    self.assertEqual(turbo.reason, reason)
+                    self.assertEqual(calls, [expected, "hardware"])
 
-    def test_fan_mode_gpu_wakeup_prevents_turbo_enable(self):
-        with patch.object(control, "gpu_powered_off", side_effect=(True, False)), patch.object(control, "set_cpu_turbo") as turbo:
-            reading = control.apply_control(Mock(), control.normal_control(False, 3500), True)
-        self.assertFalse(reading.allowed)
-        self.assertEqual(reading.reason, "gpu_not_confirmed_off")
-        turbo.assert_called_once_with(False)
-
-    def test_turbo_tracks_gpu_transitions_without_mode_changes(self):
+    def test_turbo_tracks_card_transitions_without_mode_changes(self):
         hardware = Mock()
         desired = control.normal_control(False, 3500)
-        with patch.object(control, "gpu_powered_off", side_effect=(True, True, False, True, True)), patch.object(control, "set_cpu_turbo") as turbo:
-            self.assertTrue(control.apply_control(hardware, desired, True).allowed)
-            self.assertFalse(control.apply_control(hardware, desired, True).allowed)
-            self.assertTrue(control.apply_control(hardware, desired, True).allowed)
-        self.assertEqual([call.args for call in turbo.call_args_list], [(True,), (False,), (True,)])
+        with patch.object(control, "set_cpu_turbo") as turbo:
+            self.assertFalse(control.apply_control(hardware, desired, True, True).allowed)
+            self.assertTrue(control.apply_control(hardware, desired, False, True).allowed)
+            self.assertFalse(control.apply_control(hardware, desired, True, True).allowed)
+        self.assertEqual([call.args for call in turbo.call_args_list], [(False,), (True,), (False,)])
 
     def test_turbo_tracks_ac_transitions_without_mode_changes(self):
         hardware = Mock()
         desired = control.normal_control(False, 3500)
-        with patch.object(control, "gpu_powered_off", return_value=True), patch.object(control, "set_cpu_turbo") as turbo:
-            self.assertTrue(control.apply_control(hardware, desired, True).allowed)
-            self.assertFalse(control.apply_control(hardware, desired, False).allowed)
-            self.assertTrue(control.apply_control(hardware, desired, True).allowed)
+        with patch.object(control, "set_cpu_turbo") as turbo:
+            self.assertTrue(control.apply_control(hardware, desired, False, True).allowed)
+            self.assertFalse(control.apply_control(hardware, desired, False, False).allowed)
+            self.assertTrue(control.apply_control(hardware, desired, False, True).allowed)
         self.assertEqual([call.args for call in turbo.call_args_list], [(True,), (False,), (True,)])
 
     def test_failed_turbo_disable_blocks_gaming_entry(self):
         hardware = Mock()
         with patch.object(control, "set_cpu_turbo", side_effect=control.ControlError("denied")):
             with self.assertRaises(control.ControlError):
-                control.apply_control(hardware, control.normal_control(True, 3500), True)
+                control.apply_control(hardware, control.normal_control(True, 3500), True, True)
         hardware.ensure.assert_not_called()
 
-    def test_failed_hardware_exit_does_not_enable_turbo_early(self):
+    def test_failed_hardware_apply_keeps_turbo_policy(self):
         hardware = Mock()
         hardware.ensure.side_effect = control.ControlError("HID failure")
-        with patch.object(control, "gpu_powered_off", return_value=True), patch.object(control, "set_cpu_turbo") as turbo:
+        with patch.object(control, "set_cpu_turbo") as turbo:
             with self.assertRaises(control.ControlError):
-                control.apply_control(hardware, control.safe_control(), True)
-        turbo.assert_not_called()
+                control.apply_control(hardware, control.safe_control(), False, True)
+        turbo.assert_called_once_with(True)
 
     def test_reset_disables_turbo_even_if_hid_reset_fails(self):
         hardware = Mock()
@@ -348,7 +324,8 @@ class DaemonStatusTests(unittest.TestCase):
         telemetry = Mock()
         telemetry.cpu_temperature.return_value = (50, None)
         telemetry.gpu_reading.return_value = control.GPUReading(
-            power_state="D0", runtime_status="active", in_use=True, clients=["test-client"],
+            card_present=True, power_state="D0", runtime_status="active", in_use=True,
+            mode="hybrid", mode_applied=True, clients=["test-client"],
         )
         hardware = Mock(collisions=0)
         publisher = Mock()
@@ -359,11 +336,10 @@ class DaemonStatusTests(unittest.TestCase):
             control.STOP_REQUESTED = True
 
         publisher.publish.side_effect = published
-        gpu_read = Mock(return_value=False)
         with patch.multiple(control, Telemetry=Mock(return_value=telemetry),
                             HardwareController=Mock(return_value=hardware),
                             StatusPublisher=Mock(return_value=publisher),
-                            read_ac_online=Mock(return_value=None), gpu_powered_off=gpu_read,
+                            read_ac_online=Mock(return_value=None),
                             set_cpu_turbo=Mock(), suspend_offset=Mock(return_value=0), STOP_REQUESTED=False), \
                 patch.object(control.signal, "signal"):
             self.assertEqual(control.run_daemon(), 0)
@@ -375,7 +351,60 @@ class DaemonStatusTests(unittest.TestCase):
         self.assertEqual(snapshot.control.performance_mode, "Balanced")
         self.assertEqual(snapshot.control.fan_reason, "firmware")
         self.assertEqual(snapshot.control.control_temp_c, 50)
-        gpu_read.assert_not_called()
+        self.assertEqual(snapshot.gpu.mode, "hybrid")
+        self.assertTrue(snapshot.gpu.mode_applied)
+
+
+class GpuModeTelemetryTests(unittest.TestCase):
+    def test_mode_flag_matches_gpu_mode_toggle_flag_path(self):
+        self.assertEqual(str(control.MODE_FLAG), "/var/lib/gpu-mode/integrated")
+
+    def test_gpu_reading_reports_mode_and_presence(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            device = root / "device"
+            flag = root / "integrated"
+            telemetry = control.Telemetry()
+            telemetry.nvml = Mock()
+            telemetry.nvml.sample.return_value = (45, 0, 128, 6144)
+            for integrated, present in ((True, False), (False, True), (True, True), (False, False)):
+                with self.subTest(integrated=integrated, present=present):
+                    if integrated:
+                        flag.touch()
+                    elif flag.exists():
+                        flag.unlink()
+                    if present:
+                        (device / "power").mkdir(parents=True, exist_ok=True)
+                        (device / "power_state").write_text("D0\n")
+                        (device / "power" / "runtime_status").write_text("active\n")
+                    else:
+                        shutil.rmtree(device, ignore_errors=True)
+                    with patch.object(control, "GPU_SYSFS_DIRECTORY", device), \
+                            patch.object(control, "MODE_FLAG", flag), \
+                            patch.object(control, "GPU_DEVICE_NODE", root / "absent"):
+                        reading = telemetry.gpu_reading()
+                    self.assertIs(reading.card_present, present)
+                    self.assertEqual(reading.mode, "integrated" if integrated else "hybrid")
+                    self.assertIs(reading.mode_applied, integrated is not present)
+
+    def test_nvml_samples_whenever_gpu_is_active(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            sysfs = root / "sysfs"
+            sysfs.mkdir()
+            (sysfs / "power").mkdir()
+            (sysfs / "power_state").write_text("D0\n")
+            (sysfs / "power" / "runtime_status").write_text("active\n")
+            telemetry = control.Telemetry()
+            telemetry.nvml = Mock()
+            telemetry.nvml.sample.return_value = (45, 0, 128, 6144)
+            with patch.object(control, "GPU_SYSFS_DIRECTORY", sysfs), \
+                    patch.object(control, "GPU_DEVICE_NODE", root / "absent"):
+                reading = telemetry.gpu_reading()
+            telemetry.nvml.sample.assert_called_once()
+            self.assertEqual(reading.temperature_c, 45)
+            self.assertIsNone(reading.error)
+            self.assertFalse(reading.in_use)
 
 
 class StatusPublisherTests(unittest.TestCase):

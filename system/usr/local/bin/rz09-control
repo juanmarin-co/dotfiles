@@ -51,6 +51,7 @@ GPU_PCI_ADDRESS = "0000:01:00.0"
 GPU_NVML_PCI_ADDRESS = b"00000000:01:00.0"
 GPU_DEVICE_NODE = Path("/dev/nvidia0")
 GPU_SYSFS_DIRECTORY = Path("/sys/bus/pci/devices") / GPU_PCI_ADDRESS
+MODE_FLAG = Path("/var/lib/gpu-mode/integrated")
 FUSER = "/usr/bin/fuser"
 
 # Razer HID protocol
@@ -97,9 +98,12 @@ class DesiredControl:
 
 @dataclass
 class GPUReading:
+    card_present: bool = False
     power_state: str = "unknown"
     runtime_status: str = "unknown"
     in_use: bool = False
+    mode: str = "hybrid"
+    mode_applied: bool = False
     temperature_c: int | None = None
     utilization_percent: int | None = None
     memory_used_mb: int | None = None
@@ -186,7 +190,7 @@ def run_daemon() -> int:
                 desired = policy.evaluate(
                     cpu_temp,
                     gpu.temperature_c,
-                    gpu.in_use,
+                    gpu.card_present,
                     ac_online is True,
                     time.monotonic(),
                 )
@@ -195,7 +199,7 @@ def run_daemon() -> int:
             cpu_turbo_allowed = None
             cpu_turbo_reason = "control_error"
             try:
-                turbo = apply_control(controller, desired, ac_online)
+                turbo = apply_control(controller, desired, gpu.card_present, ac_online)
                 cpu_turbo_allowed = turbo.allowed
                 cpu_turbo_reason = turbo.reason
             except ControlError as error:
@@ -273,38 +277,28 @@ def sleep_until_stop(seconds: float) -> None:
 # Policy and control orchestration
 
 def apply_control(
-    controller: HardwareController, desired: DesiredControl, ac_online: bool | None
+    controller: HardwareController,
+    desired: DesiredControl,
+    card_present: bool,
+    ac_online: bool | None,
 ) -> TurboReading:
-    # Record the reason from the same decision that controls turbo, without extra GPU queries.
     if ac_online is not True:
         allowed = False
         reason = "ac_unknown" if ac_online is None else "on_battery"
-    elif desired.mode == MODE_GAMING:
+    elif card_present:
         allowed = False
-        reason = "gaming_mode"
+        reason = "dgpu_active"
     else:
-        allowed = gpu_powered_off()
-        reason = "ac_and_gpu_off" if allowed else "gpu_not_confirmed_off"
-    if not allowed:
-        set_cpu_turbo(False)
+        allowed = True
+        reason = "dgpu_absent"
+    # Set turbo before switching hardware so a failed turbo write blocks Gaming entry.
+    set_cpu_turbo(allowed)
     controller.ensure(desired)
-    if allowed:
-        # Fan-mode changes can wake the GPU; do not trust the earlier reading.
-        allowed = gpu_powered_off()
-        set_cpu_turbo(allowed)
-        reason = "ac_and_gpu_off" if allowed else "gpu_not_confirmed_off"
     return TurboReading(allowed, reason)
 
 
 def read_ac_online() -> bool | None:
     return {"1": True, "0": False}.get(read_text(AC_ONLINE_PATH, "unknown"))
-
-
-def gpu_powered_off() -> bool:
-    return (
-        read_text(GPU_SYSFS_DIRECTORY / "power_state", "unknown") == "D3cold"
-        and read_text(GPU_SYSFS_DIRECTORY / "power/runtime_status", "unknown") == "suspended"
-    )
 
 
 def set_cpu_turbo(allowed: bool) -> None:
@@ -392,7 +386,7 @@ class FanPolicy:
         self,
         cpu_temperature: float,
         gpu_temperature: float | None,
-        gpu_in_use: bool,
+        card_present: bool,
         ac_online: bool,
         now: float,
     ) -> DesiredControl:
@@ -420,7 +414,7 @@ class FanPolicy:
         else:
             reason = "warming_up" if self.entry_since is not None else "firmware"
         return normal_control(
-            gpu_in_use and ac_online,
+            card_present and ac_online,
             self.fan_demand,
             self.high_temperature_cooling,
             fan_reason=reason,
@@ -638,6 +632,9 @@ class Telemetry:
 
     def gpu_reading(self) -> GPUReading:
         reading = GPUReading(clients=[])
+        reading.card_present = GPU_SYSFS_DIRECTORY.exists()
+        reading.mode = "integrated" if MODE_FLAG.exists() else "hybrid"
+        reading.mode_applied = (reading.mode == "integrated") is not reading.card_present
         reading.power_state = read_text(GPU_SYSFS_DIRECTORY / "power_state", "unknown")
         reading.runtime_status = read_text(
             GPU_SYSFS_DIRECTORY / "power/runtime_status", "unknown"
@@ -653,9 +650,6 @@ class Telemetry:
             self.gpu_clients_checked_at = now
         reading.in_use = bool(self.gpu_pids)
         reading.clients = process_names(self.gpu_pids)
-        if not self.gpu_pids:
-            return reading
-
         try:
             metrics = self.nvml.sample()
             reading.temperature_c = metrics[0]
