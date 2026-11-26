@@ -1,0 +1,86 @@
+#!/usr/bin/env python3
+"""Manual NVIDIA dGPU mode controller for the Razer RZ09-0328."""
+
+from __future__ import annotations
+
+import argparse
+import logging
+from pathlib import Path
+
+# Hardware
+GPU_FUNCTIONS = ("0000:01:00.0", "0000:01:00.1", "0000:01:00.2", "0000:01:00.3")
+PCI_DEVICES = Path("/sys/bus/pci/devices")
+
+# Mode state
+MODE_DIRECTORY = Path("/var/lib/gpu-mode")
+
+LOG = logging.getLogger("gpu-mode")
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "command", choices=("remove", "set-integrated", "set-hybrid", "status")
+    )
+    args = parser.parse_args()
+
+    logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
+    if args.command == "remove":
+        return remove_card()
+    if args.command == "set-integrated":
+        return set_mode(True)
+    if args.command == "set-hybrid":
+        return set_mode(False)
+    return print_status()
+
+
+def remove_card() -> int:
+    """Remove every NVIDIA PCI function so the slot can release power."""
+    failed = False
+    for address in GPU_FUNCTIONS:
+        remove = PCI_DEVICES / address / "remove"
+        try:
+            remove.write_text("1\n")
+        except FileNotFoundError:
+            continue
+        except OSError as error:
+            LOG.error("could not remove %s: %s", address, error)
+            failed = True
+            continue
+        LOG.info("removed %s", address)
+    return int(failed)
+
+
+def set_mode(integrated: bool) -> int:
+    flag = MODE_DIRECTORY / "integrated"
+    try:
+        if integrated:
+            MODE_DIRECTORY.mkdir(parents=True, exist_ok=True)
+            flag.touch()
+        else:
+            flag.unlink(missing_ok=True)
+    except OSError as error:
+        LOG.error("could not update the mode flag: %s", error)
+        return 1
+    LOG.info("mode set: %s", "integrated" if integrated else "hybrid")
+    return 0
+
+
+def print_status() -> int:
+    integrated = (MODE_DIRECTORY / "integrated").exists()
+    present = card_present()
+    applied = integrated is not present
+    print(
+        f"mode={'integrated' if integrated else 'hybrid'} "
+        f"card_present={'yes' if present else 'no'} "
+        f"{'applied' if applied else 'pending reboot'}"
+    )
+    return 0
+
+
+def card_present() -> bool:
+    return (PCI_DEVICES / GPU_FUNCTIONS[0]).exists()
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

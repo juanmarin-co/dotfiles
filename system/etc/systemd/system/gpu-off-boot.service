@@ -1,0 +1,14 @@
+[Unit]
+Description=Remove the NVIDIA dGPU for integrated graphics mode
+After=systemd-udev-trigger.service
+Before=display-manager.service
+ConditionPathExists=/var/lib/gpu-mode/integrated
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/gpu-mode remove
+NoNewPrivileges=yes
+PrivateTmp=yes
+
+[Install]
+WantedBy=multi-user.target

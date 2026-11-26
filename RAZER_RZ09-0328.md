@@ -16,6 +16,14 @@ Many laptops expose performance and cooling controls through Linux drivers and s
 
 Razer performance modes are separate from Linux power profiles. Tools such as TLP and `power-profiles-daemon` configure kernel power-management settings; on this model, they do not select the proprietary Razer performance mode.
 
+## Discrete GPU Power Modes
+
+The dGPU runs in one of two modes: **hybrid** (card present, driver bound) or **integrated** (card removed from the PCI bus). A flag file at `/var/lib/gpu-mode/integrated` selects the mode; `gpu-mode set-integrated` / `set-hybrid` (via `gpu-mode-integrated.service` / `gpu-mode-hybrid.service`, permitted without a password by `polkit-1/rules.d/50-gpu-mode.rules`) flip it, and `gpu-off-boot.service` removes the four PCI functions `01:00.0`–`01:00.3` at boot, before the display manager, when the flag is set. A reboot applies a mode change.
+
+The firmware implements D3cold for the dGPU on the GPU endpoint: SSDT12 defines `_PR0`, `_PR2`, and `_PR3` referencing the `PG00` power resource (plus `GC6I` and `PGOF`) under `\_SB.PCI0.PEG0.PEGP`. The NVIDIA driver instead evaluates `_PR3` on the upstream root port `\_SB.PCI0.PEG0`, which does not define it, so the driver reports `Runtime D3 status: Not supported` regardless of kernel or driver version. Automatic runtime D3 is therefore unavailable on this model; the manual toggle replaces it. `NVreg_DynamicPowerManagement=0x02` and the runtime-PM udev rules remain as standard configuration and stay dormant. Applications select GPUs by default; the dGPU is present only in hybrid mode, so no environment pinning is configured.
+
+`rz09-control` derives its policy from the mode. Gaming performance mode requires the card present and AC power; CPU turbo is allowed only on AC with the card absent, and blocked otherwise (`dgpu_active` while present, `dgpu_absent` when allowed). NVML sampling runs whenever the card reports `D0`/`active`, so GPU temperature feeds the fan curve with or without client processes. The status snapshot reports `gpu.card_present`, `gpu.mode`, and `gpu.mode_applied`; a mode mode/presence mismatch means a reboot is pending.
+
 ## USB HID Communication
 
 Software controls the RZ09-0328’s fans and performance settings through **USB HID (Human Interface Device)**. The built-in Razer USB device has vendor ID `1532` and product ID `0255`, conventionally written as **`1532:0255`**.

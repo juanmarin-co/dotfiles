@@ -1,0 +1,9 @@
+[Unit]
+Description=Select hybrid graphics mode (dGPU present at next boot)
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/gpu-mode set-hybrid
+StateDirectory=gpu-mode
+NoNewPrivileges=yes
+PrivateTmp=yes

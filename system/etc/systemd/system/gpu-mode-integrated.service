@@ -1,0 +1,9 @@
+[Unit]
+Description=Select integrated graphics mode (dGPU removed at next boot)
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/gpu-mode set-integrated
+StateDirectory=gpu-mode
+NoNewPrivileges=yes
+PrivateTmp=yes
